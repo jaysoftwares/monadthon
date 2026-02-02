@@ -1,34 +1,206 @@
-.App-logo {
-    height: 40vmin;
+/* CLAW ARENA - Main Application Styles */
+
+/* Logo styles */
+.claw-logo {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.claw-logo-mark {
+    width: 40px;
+    height: 40px;
+    position: relative;
+}
+
+.claw-logo-mark::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, #836EF9 0%, #6D5ACF 100%);
+    border-radius: 8px;
+    transform: rotate(45deg);
+}
+
+.claw-logo-mark::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 20px;
+    height: 20px;
+    background: white;
+    border-radius: 4px;
+    clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+}
+
+.claw-logo-text {
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: 1.5rem;
+    color: #0F0F11;
+    letter-spacing: -0.03em;
+}
+
+.claw-logo-text span {
+    color: #836EF9;
+}
+
+/* Navigation */
+.nav-link {
+    @apply text-gray-600 hover:text-[#836EF9] transition-colors duration-200 font-medium;
+}
+
+.nav-link.active {
+    @apply text-[#836EF9];
+}
+
+/* Hero section */
+.hero-section {
+    position: relative;
+    overflow: hidden;
+}
+
+.hero-section::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    right: -20%;
+    width: 80%;
+    height: 150%;
+    background: radial-gradient(ellipse at center, rgba(131, 110, 249, 0.1) 0%, transparent 70%);
     pointer-events: none;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-    .App-logo {
-        animation: App-logo-spin infinite 20s linear;
-    }
+/* Arena card */
+.arena-card {
+    @apply bg-white border border-gray-100 rounded-2xl p-6 transition-all duration-300;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
 }
 
-.App-header {
-    background-color: #0f0f10;
-    min-height: 100vh;
+.arena-card:hover {
+    @apply border-purple-200;
+    box-shadow: 0 12px 40px rgba(131, 110, 249, 0.12);
+    transform: translateY(-2px);
+}
+
+/* Player avatar */
+.player-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #836EF9 0%, #6D5ACF 100%);
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    font-size: calc(10px + 2vmin);
+    color: white;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+/* Stats card */
+.stats-card {
+    @apply bg-gradient-to-br from-white to-purple-50 border border-purple-100 rounded-xl p-4;
+}
+
+/* Leaderboard */
+.leaderboard-rank {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.875rem;
+}
+
+.leaderboard-rank.gold {
+    background: linear-gradient(135deg, #FFD700 0%, #FFA500 100%);
     color: white;
 }
 
-.App-link {
-    color: #61dafb;
+.leaderboard-rank.silver {
+    background: linear-gradient(135deg, #C0C0C0 0%, #A8A8A8 100%);
+    color: white;
 }
 
-@keyframes App-logo-spin {
-    from {
-        transform: rotate(0deg);
-    }
-    to {
-        transform: rotate(360deg);
+.leaderboard-rank.bronze {
+    background: linear-gradient(135deg, #CD7F32 0%, #B87333 100%);
+    color: white;
+}
+
+.leaderboard-rank.default {
+    background: #F5F3FF;
+    color: #836EF9;
+}
+
+/* Wallet button */
+.wallet-btn {
+    @apply flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all duration-200;
+}
+
+.wallet-btn.connected {
+    @apply bg-purple-50 text-[#836EF9] border border-purple-200;
+}
+
+.wallet-btn.disconnected {
+    @apply bg-[#836EF9] text-white hover:bg-[#6D5ACF];
+    box-shadow: 0 4px 14px rgba(131, 110, 249, 0.3);
+}
+
+/* Footer */
+.footer {
+    @apply border-t border-gray-100 bg-white;
+}
+
+.monad-badge {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 bg-purple-50 text-[#836EF9] rounded-full text-sm font-medium;
+}
+
+/* Form inputs */
+.form-input {
+    @apply w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg transition-all duration-200;
+}
+
+.form-input:focus {
+    @apply border-[#836EF9] ring-2 ring-purple-100 outline-none;
+}
+
+/* Transaction hash */
+.tx-hash {
+    @apply font-mono text-sm text-[#836EF9] hover:underline cursor-pointer;
+}
+
+/* Loading skeleton */
+.skeleton {
+    @apply bg-gradient-to-r from-gray-100 via-gray-200 to-gray-100 bg-[length:200%_100%] animate-gradient;
+}
+
+/* Empty state */
+.empty-state {
+    @apply flex flex-col items-center justify-center py-16 text-center;
+}
+
+.empty-state-icon {
+    @apply w-16 h-16 bg-purple-100 rounded-full flex items-center justify-center mb-4;
+}
+
+/* Admin panel */
+.admin-section {
+    @apply bg-white border border-gray-100 rounded-2xl p-6;
+}
+
+.admin-section-title {
+    @apply text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2;
+}
+
+/* Responsive table */
+@media (max-width: 768px) {
+    .responsive-table {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
     }
 }
