@@ -2,6 +2,7 @@ import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useWallet } from '../context/WalletContext';
 import { Button } from '../components/ui/button';
+import NetworkSwitcher from './NetworkSwitcher';
 import { Wallet, Menu, X, AlertTriangle, Loader2 } from 'lucide-react';
 
 const Header = () => {
@@ -58,8 +59,15 @@ const Header = () => {
               ))}
             </nav>
 
-            {/* Wallet Button */}
-            <div className="flex items-center gap-4">
+            {/* Network Switcher & Wallet Button */}
+            <div className="flex items-center gap-3">
+              {/* Network Switcher - only show when connected to Monad */}
+              {isConnected && !wrongNetwork && (
+                <div className="hidden sm:block">
+                  <NetworkSwitcher />
+                </div>
+              )}
+
               {isConnected ? (
                 wrongNetwork ? (
                   // Wrong network - show switch button
