@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, Query
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -6,23 +6,49 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional
+from typing import List, Optional, Literal
 import uuid
 from datetime import datetime, timezone
 import hashlib
-import json
+import httpx
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[os.environ.get('DB_NAME', 'claw_arena')]
 
-# Environment variables
-ADMIN_API_KEY = os.environ.get('ADMIN_API_KEY', 'claw-arena-admin-key')
-AGENT_ORCHESTRATOR_URL = os.environ.get('AGENT_ORCHESTRATOR_URL', 'http://localhost:8002')
+# ===========================================
+# Environment Configuration
+# ===========================================
+
+ADMIN_API_KEY = os.environ.get('ADMIN_API_KEY', '')
+DEFAULT_NETWORK = os.environ.get('DEFAULT_NETWORK', 'testnet')
+
+# Network Configuration
+NETWORK_CONFIG = {
+    'testnet': {
+        'chain_id': int(os.environ.get('TESTNET_CHAIN_ID', '10143')),
+        'rpc_url': os.environ.get('TESTNET_RPC_URL', 'https://testnet-rpc.monad.xyz'),
+        'explorer_url': os.environ.get('TESTNET_EXPLORER_URL', 'https://testnet.monadexplorer.com'),
+        'arena_factory': os.environ.get('TESTNET_ARENA_FACTORY_ADDRESS', ''),
+        'treasury': os.environ.get('TESTNET_TREASURY_ADDRESS', ''),
+    },
+    'mainnet': {
+        'chain_id': int(os.environ.get('MAINNET_CHAIN_ID', '143')),
+        'rpc_url': os.environ.get('MAINNET_RPC_URL', 'https://rpc.monad.xyz'),
+        'explorer_url': os.environ.get('MAINNET_EXPLORER_URL', 'https://monadscan.com'),
+        'arena_factory': os.environ.get('MAINNET_ARENA_FACTORY_ADDRESS', ''),
+        'treasury': os.environ.get('MAINNET_TREASURY_ADDRESS', ''),
+    }
+}
+
+# OpenClaw Configuration
+OPENCLAW_API_URL = os.environ.get('OPENCLAW_API_URL', '')
+OPENCLAW_API_KEY = os.environ.get('OPENCLAW_API_KEY', '')
+OPERATOR_ADDRESS = os.environ.get('OPERATOR_ADDRESS', '')
 
 # Create the main app
 app = FastAPI(title="CLAW ARENA API", version="1.0.0")
@@ -37,18 +63,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ============ MODELS ============
+# ===========================================
+# MODELS
+# ===========================================
+
+class NetworkConfig(BaseModel):
+    chain_id: int
+    rpc_url: str
+    explorer_url: str
+    arena_factory: str
+    treasury: str
 
 class ArenaCreate(BaseModel):
     name: str
     entry_fee: str  # In MON (wei string)
     max_players: int = 8
     protocol_fee_bps: int = 250  # 2.5%
-    treasury: str = "0x0000000000000000000000000000000000000000"
+    contract_address: str  # Real contract address from on-chain deployment
 
 class Arena(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     address: str  # Contract address
     name: str
@@ -56,6 +91,7 @@ class Arena(BaseModel):
     max_players: int
     protocol_fee_bps: int
     treasury: str
+    network: str = DEFAULT_NETWORK  # "testnet" or "mainnet"
     players: List[str] = []
     is_closed: bool = False
     is_finalized: bool = False
@@ -73,7 +109,7 @@ class JoinArena(BaseModel):
 
 class PlayerJoin(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     arena_address: str
     player_address: str
@@ -82,7 +118,7 @@ class PlayerJoin(BaseModel):
 
 class LeaderboardEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    
+
     address: str
     total_wins: int = 0
     total_payouts: str = "0"
@@ -107,7 +143,7 @@ class FinalizeSignatureResponse(BaseModel):
 
 class PayoutRecord(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     arena_address: str
     winner_address: str
@@ -115,40 +151,158 @@ class PayoutRecord(BaseModel):
     tx_hash: str
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
-# ============ DEPENDENCIES ============
+# ===========================================
+# DEPENDENCIES
+# ===========================================
 
 async def verify_admin_key(x_admin_key: str = Header(None)):
+    if not ADMIN_API_KEY:
+        raise HTTPException(status_code=500, detail="Admin API key not configured")
     if x_admin_key != ADMIN_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid admin API key")
     return True
 
-# ============ HELPER FUNCTIONS ============
+def get_network_config(network: str) -> NetworkConfig:
+    """Get configuration for specified network"""
+    if network not in NETWORK_CONFIG:
+        raise HTTPException(status_code=400, detail=f"Invalid network: {network}. Use 'testnet' or 'mainnet'")
+    config = NETWORK_CONFIG[network]
+    return NetworkConfig(**config)
 
-def generate_mock_address():
-    """Generate a mock Ethereum address"""
-    random_bytes = os.urandom(20)
-    return "0x" + random_bytes.hex()
+# ===========================================
+# OPENCLAW INTEGRATION
+# ===========================================
 
-def generate_mock_tx_hash():
-    """Generate a mock transaction hash"""
-    random_bytes = os.urandom(32)
-    return "0x" + random_bytes.hex()
+async def request_openclaw_signature(
+    arena_address: str,
+    winners: List[str],
+    amounts: List[str],
+    nonce: int,
+    chain_id: int
+) -> dict:
+    """
+    Request EIP-712 signature from OpenClaw API.
+    Returns signature data for finalize transaction.
+    """
+    if not OPENCLAW_API_URL or not OPENCLAW_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="OpenClaw API not configured. Set OPENCLAW_API_URL and OPENCLAW_API_KEY."
+        )
 
-def generate_mock_signature():
-    """Generate a mock EIP-712 signature"""
-    random_bytes = os.urandom(65)
-    return "0x" + random_bytes.hex()
+    # EIP-712 Domain
+    domain = {
+        "name": "ClawArena",
+        "version": "1",
+        "chainId": chain_id,
+        "verifyingContract": arena_address
+    }
 
-# ============ PUBLIC ENDPOINTS ============
+    # EIP-712 Types
+    types = {
+        "Finalize": [
+            {"name": "arena", "type": "address"},
+            {"name": "winnersHash", "type": "bytes32"},
+            {"name": "amountsHash", "type": "bytes32"},
+            {"name": "nonce", "type": "uint256"}
+        ]
+    }
+
+    # Compute hashes
+    winners_hash = "0x" + hashlib.sha256(",".join(winners).encode()).hexdigest()
+    amounts_hash = "0x" + hashlib.sha256(",".join(amounts).encode()).hexdigest()
+
+    # Message to sign
+    message = {
+        "arena": arena_address,
+        "winnersHash": winners_hash,
+        "amountsHash": amounts_hash,
+        "nonce": nonce
+    }
+
+    # Request signature from OpenClaw
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{OPENCLAW_API_URL}/sign",
+                headers={
+                    "Authorization": f"Bearer {OPENCLAW_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "domain": domain,
+                    "types": types,
+                    "message": message,
+                    "primaryType": "Finalize"
+                },
+                timeout=30.0
+            )
+
+            if response.status_code != 200:
+                logger.error(f"OpenClaw API error: {response.status_code} - {response.text}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"OpenClaw API error: {response.text}"
+                )
+
+            result = response.json()
+            signature = result.get("signature")
+
+            if not signature:
+                raise HTTPException(
+                    status_code=502,
+                    detail="OpenClaw API did not return a signature"
+                )
+
+            return {
+                "signature": signature,
+                "domain": domain,
+                "types": types,
+                "message": message
+            }
+
+        except httpx.RequestError as e:
+            logger.error(f"OpenClaw API request failed: {e}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to connect to OpenClaw API: {str(e)}"
+            )
+
+# ===========================================
+# PUBLIC ENDPOINTS
+# ===========================================
 
 @api_router.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "claw-arena-api", "timestamp": datetime.now(timezone.utc).isoformat()}
+    return {
+        "status": "healthy",
+        "service": "claw-arena-api",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "default_network": DEFAULT_NETWORK,
+        "openclaw_configured": bool(OPENCLAW_API_URL and OPENCLAW_API_KEY)
+    }
+
+@api_router.get("/config")
+async def get_config(network: str = Query(default=DEFAULT_NETWORK)):
+    """Get network configuration"""
+    config = get_network_config(network)
+    return {
+        "network": network,
+        "chain_id": config.chain_id,
+        "rpc_url": config.rpc_url,
+        "explorer_url": config.explorer_url,
+        "arena_factory": config.arena_factory,
+        "treasury": config.treasury,
+        "operator_address": OPERATOR_ADDRESS
+    }
 
 @api_router.get("/arenas", response_model=List[Arena])
-async def get_arenas():
-    """Get all arenas"""
-    arenas = await db.arenas.find({}, {"_id": 0}).to_list(100)
+async def get_arenas(network: str = Query(default=None)):
+    """Get all arenas, optionally filtered by network"""
+    query = {}
+    if network:
+        query["network"] = network
+    arenas = await db.arenas.find(query, {"_id": 0}).to_list(100)
     return arenas
 
 @api_router.get("/arenas/{address}", response_model=Arena)
@@ -160,8 +314,9 @@ async def get_arena(address: str):
     return arena
 
 @api_router.get("/leaderboard", response_model=List[LeaderboardEntry])
-async def get_leaderboard(limit: int = 50):
+async def get_leaderboard(limit: int = 50, network: str = Query(default=None)):
     """Get leaderboard sorted by total payouts"""
+    # Note: Leaderboard is global, but could be filtered by network if needed
     leaderboard = await db.leaderboard.find({}, {"_id": 0}).sort("total_payouts", -1).to_list(limit)
     return leaderboard
 
@@ -177,7 +332,9 @@ async def get_arena_payouts(address: str):
     payouts = await db.payouts.find({"arena_address": address}, {"_id": 0}).to_list(100)
     return {"arena_address": address, "payouts": payouts}
 
-# ============ JOIN ENDPOINT (simulates indexer receiving event) ============
+# ===========================================
+# JOIN ENDPOINT
+# ===========================================
 
 @api_router.post("/arenas/join")
 async def join_arena(join_data: JoinArena):
@@ -185,19 +342,19 @@ async def join_arena(join_data: JoinArena):
     arena = await db.arenas.find_one({"address": join_data.arena_address})
     if not arena:
         raise HTTPException(status_code=404, detail="Arena not found")
-    
+
     if arena.get("is_closed"):
         raise HTTPException(status_code=400, detail="Arena registration is closed")
-    
+
     if arena.get("is_finalized"):
         raise HTTPException(status_code=400, detail="Arena is already finalized")
-    
+
     if len(arena.get("players", [])) >= arena.get("max_players", 8):
         raise HTTPException(status_code=400, detail="Arena is full")
-    
+
     if join_data.player_address in arena.get("players", []):
         raise HTTPException(status_code=400, detail="Player already joined")
-    
+
     # Record join
     join_record = PlayerJoin(
         arena_address=join_data.arena_address,
@@ -205,13 +362,13 @@ async def join_arena(join_data: JoinArena):
         tx_hash=join_data.tx_hash
     )
     await db.joins.insert_one(join_record.model_dump())
-    
+
     # Update arena players
     await db.arenas.update_one(
         {"address": join_data.arena_address},
         {"$push": {"players": join_data.player_address}}
     )
-    
+
     # Update leaderboard entry
     await db.leaderboard.update_one(
         {"address": join_data.player_address},
@@ -221,31 +378,50 @@ async def join_arena(join_data: JoinArena):
         },
         upsert=True
     )
-    
+
     logger.info(f"Player {join_data.player_address} joined arena {join_data.arena_address}")
-    
+
     return {"success": True, "message": "Player joined arena", "tx_hash": join_data.tx_hash}
 
-# ============ ADMIN ENDPOINTS ============
+# ===========================================
+# ADMIN ENDPOINTS
+# ===========================================
 
 @api_router.post("/admin/arena/create", response_model=Arena)
-async def create_arena(arena_data: ArenaCreate, _: bool = Depends(verify_admin_key)):
-    """Create a new arena (returns data for frontend to send tx)"""
-    arena_address = generate_mock_address()
-    
+async def create_arena(
+    arena_data: ArenaCreate,
+    network: str = Query(default=DEFAULT_NETWORK),
+    _: bool = Depends(verify_admin_key)
+):
+    """
+    Register a new arena after it's been deployed on-chain.
+    The contract_address must be the real deployed contract address.
+    """
+    config = get_network_config(network)
+
+    # Validate contract address format
+    if not arena_data.contract_address.startswith("0x") or len(arena_data.contract_address) != 42:
+        raise HTTPException(status_code=400, detail="Invalid contract address format")
+
+    # Check if arena already exists
+    existing = await db.arenas.find_one({"address": arena_data.contract_address})
+    if existing:
+        raise HTTPException(status_code=400, detail="Arena with this address already exists")
+
     arena = Arena(
-        address=arena_address,
+        address=arena_data.contract_address,
         name=arena_data.name,
         entry_fee=arena_data.entry_fee,
         max_players=arena_data.max_players,
         protocol_fee_bps=arena_data.protocol_fee_bps,
-        treasury=arena_data.treasury
+        treasury=config.treasury,
+        network=network
     )
-    
+
     await db.arenas.insert_one(arena.model_dump())
-    
-    logger.info(f"Created arena {arena.name} at {arena_address}")
-    
+
+    logger.info(f"Created arena {arena.name} at {arena_data.contract_address} on {network}")
+
     return arena
 
 @api_router.post("/admin/arena/{address}/close")
@@ -254,100 +430,92 @@ async def close_arena(address: str, _: bool = Depends(verify_admin_key)):
     arena = await db.arenas.find_one({"address": address})
     if not arena:
         raise HTTPException(status_code=404, detail="Arena not found")
-    
+
     if arena.get("is_closed"):
         raise HTTPException(status_code=400, detail="Arena is already closed")
-    
+
     await db.arenas.update_one(
         {"address": address},
         {"$set": {"is_closed": True, "closed_at": datetime.now(timezone.utc).isoformat()}}
     )
-    
+
     logger.info(f"Closed arena {address}")
-    
+
     return {"success": True, "message": "Arena registration closed"}
 
 @api_router.post("/admin/arena/request-finalize-signature", response_model=FinalizeSignatureResponse)
 async def request_finalize_signature(request: FinalizeRequest, _: bool = Depends(verify_admin_key)):
     """
-    Request EIP-712 signature from OpenClaw agent orchestrator for finalize.
-    This endpoint calls the agent-orchestrator service which in turn calls OpenClaw Gateway.
+    Request EIP-712 signature from OpenClaw for finalize transaction.
     """
     arena = await db.arenas.find_one({"address": request.arena_address})
     if not arena:
         raise HTTPException(status_code=404, detail="Arena not found")
-    
+
     if arena.get("is_finalized"):
         raise HTTPException(status_code=400, detail="Arena is already finalized")
-    
+
     if not arena.get("is_closed"):
         raise HTTPException(status_code=400, detail="Arena registration must be closed first")
-    
+
+    # Validate winners and amounts
+    if len(request.winners) != len(request.amounts):
+        raise HTTPException(status_code=400, detail="Winners and amounts arrays must have same length")
+
+    if len(request.winners) == 0:
+        raise HTTPException(status_code=400, detail="Must have at least one winner")
+
+    # Get network config
+    network = arena.get("network", DEFAULT_NETWORK)
+    config = get_network_config(network)
+
     # Get nonce for replay protection
     nonce = await db.nonces.count_documents({}) + 1
-    await db.nonces.insert_one({"arena_address": request.arena_address, "nonce": nonce})
-    
-    # In production, this would call the agent-orchestrator service
-    # For now, we generate a mock signature
-    
-    # EIP-712 Domain
-    chain_id = int(os.environ.get('CHAIN_ID', '10143'))  # Monad testnet
-    domain = {
-        "name": "ClawArena",
-        "version": "1",
-        "chainId": chain_id,
-        "verifyingContract": request.arena_address
-    }
-    
-    # EIP-712 Types
-    types = {
-        "Finalize": [
-            {"name": "arena", "type": "address"},
-            {"name": "winnersHash", "type": "bytes32"},
-            {"name": "amountsHash", "type": "bytes32"},
-            {"name": "nonce", "type": "uint256"}
-        ]
-    }
-    
-    # Compute hashes
-    winners_hash = "0x" + hashlib.sha256(",".join(request.winners).encode()).hexdigest()
-    amounts_hash = "0x" + hashlib.sha256(",".join(request.amounts).encode()).hexdigest()
-    
-    # Message to sign
-    message = {
-        "arena": request.arena_address,
-        "winnersHash": winners_hash,
-        "amountsHash": amounts_hash,
-        "nonce": nonce
-    }
-    
-    # Mock operator address (in production, this comes from OpenClaw)
-    operator_address = os.environ.get('OPERATOR_ADDRESS', '0x742d35Cc6634C0532925a3b844Bc9e7595f3F4D0')
-    
-    # Mock signature (in production, OpenClaw signs this)
-    signature = generate_mock_signature()
-    
-    logger.info(f"Generated finalize signature for arena {request.arena_address}")
-    
+    await db.nonces.insert_one({
+        "arena_address": request.arena_address,
+        "nonce": nonce,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+
+    # Request signature from OpenClaw
+    signature_data = await request_openclaw_signature(
+        arena_address=request.arena_address,
+        winners=request.winners,
+        amounts=request.amounts,
+        nonce=nonce,
+        chain_id=config.chain_id
+    )
+
+    logger.info(f"Generated finalize signature for arena {request.arena_address} on {network}")
+
     return FinalizeSignatureResponse(
         arena_address=request.arena_address,
         winners=request.winners,
         amounts=request.amounts,
         nonce=nonce,
-        signature=signature,
-        operator_address=operator_address,
-        domain=domain,
-        types=types,
-        message=message
+        signature=signature_data["signature"],
+        operator_address=OPERATOR_ADDRESS,
+        domain=signature_data["domain"],
+        types=signature_data["types"],
+        message=signature_data["message"]
     )
 
 @api_router.post("/admin/arena/{address}/finalize")
-async def record_finalize(address: str, tx_hash: str, winners: List[str], amounts: List[str], _: bool = Depends(verify_admin_key)):
+async def record_finalize(
+    address: str,
+    tx_hash: str,
+    winners: List[str],
+    amounts: List[str],
+    _: bool = Depends(verify_admin_key)
+):
     """Record finalization after on-chain tx (called by frontend after successful tx)"""
     arena = await db.arenas.find_one({"address": address})
     if not arena:
         raise HTTPException(status_code=404, detail="Arena not found")
-    
+
+    if arena.get("is_finalized"):
+        raise HTTPException(status_code=400, detail="Arena is already finalized")
+
     # Update arena
     await db.arenas.update_one(
         {"address": address},
@@ -361,7 +529,7 @@ async def record_finalize(address: str, tx_hash: str, winners: List[str], amount
             }
         }
     )
-    
+
     # Record payouts and update leaderboard
     for winner, amount in zip(winners, amounts):
         payout = PayoutRecord(
@@ -371,12 +539,12 @@ async def record_finalize(address: str, tx_hash: str, winners: List[str], amount
             tx_hash=tx_hash
         )
         await db.payouts.insert_one(payout.model_dump())
-        
+
         # Update leaderboard
         current = await db.leaderboard.find_one({"address": winner})
         current_payouts = int(current.get("total_payouts", "0")) if current else 0
         new_payouts = current_payouts + int(amount)
-        
+
         await db.leaderboard.update_one(
             {"address": winner},
             {
@@ -385,27 +553,34 @@ async def record_finalize(address: str, tx_hash: str, winners: List[str], amount
             },
             upsert=True
         )
-    
+
     logger.info(f"Finalized arena {address} with tx {tx_hash}")
-    
+
     return {"success": True, "message": "Arena finalized", "tx_hash": tx_hash}
 
-# ============ INDEXER SIMULATION ENDPOINTS ============
+# ===========================================
+# INDEXER ENDPOINTS (for on-chain events)
+# ===========================================
 
 @api_router.post("/indexer/event/arena-created")
 async def index_arena_created(arena: Arena):
-    """Simulate indexer receiving ArenaCreated event"""
+    """Index ArenaCreated event from blockchain"""
     await db.arenas.update_one(
         {"address": arena.address},
         {"$set": arena.model_dump()},
         upsert=True
     )
+    logger.info(f"Indexed arena created: {arena.address}")
     return {"success": True, "message": "Arena indexed"}
 
 @api_router.post("/indexer/event/joined")
 async def index_joined(join_data: JoinArena):
-    """Simulate indexer receiving Joined event"""
+    """Index Joined event from blockchain"""
     return await join_arena(join_data)
+
+# ===========================================
+# APP CONFIGURATION
+# ===========================================
 
 # Include the router
 app.include_router(api_router)
@@ -418,6 +593,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def startup_event():
+    """Log configuration on startup"""
+    logger.info("=" * 50)
+    logger.info("CLAW ARENA API Starting")
+    logger.info(f"Default Network: {DEFAULT_NETWORK}")
+    logger.info(f"OpenClaw Configured: {bool(OPENCLAW_API_URL and OPENCLAW_API_KEY)}")
+    logger.info(f"Operator Address: {OPERATOR_ADDRESS or 'NOT SET'}")
+
+    for network, config in NETWORK_CONFIG.items():
+        logger.info(f"{network.upper()} - Chain ID: {config['chain_id']}")
+        logger.info(f"{network.upper()} - Arena Factory: {config['arena_factory'] or 'NOT SET'}")
+        logger.info(f"{network.upper()} - Treasury: {config['treasury'] or 'NOT SET'}")
+    logger.info("=" * 50)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
