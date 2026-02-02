@@ -1,0 +1,240 @@
+import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
+import { getArenas, getLeaderboard, formatMON } from '../services/api';
+import ArenaCard from '../components/ArenaCard';
+import { Button } from '../components/ui/button';
+import { Skeleton } from '../components/ui/skeleton';
+import { Trophy, Users, Coins, Zap, ArrowRight, Plus } from 'lucide-react';
+
+const LobbyPage = () => {
+  const [arenas, setArenas] = useState([]);
+  const [topPlayers, setTopPlayers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState({
+    totalArenas: 0,
+    totalPlayers: 0,
+    totalPrizePool: '0',
+  });
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const [arenasData, leaderboardData] = await Promise.all([
+          getArenas(),
+          getLeaderboard(3),
+        ]);
+        
+        setArenas(arenasData);
+        setTopPlayers(leaderboardData);
+        
+        // Calculate stats
+        const totalPlayers = arenasData.reduce((acc, arena) => acc + (arena.players?.length || 0), 0);
+        const totalPrizePool = arenasData.reduce((acc, arena) => {
+          const playerCount = arena.players?.length || 0;
+          return acc + BigInt(arena.entry_fee || '0') * BigInt(playerCount);
+        }, BigInt(0));
+        
+        setStats({
+          totalArenas: arenasData.length,
+          totalPlayers,
+          totalPrizePool: totalPrizePool.toString(),
+        });
+      } catch (error) {
+        console.error('Failed to fetch data:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchData();
+  }, []);
+
+  const openArenas = arenas.filter(a => !a.is_closed && !a.is_finalized);
+  const closedArenas = arenas.filter(a => a.is_closed || a.is_finalized);
+
+  return (
+    <div className="min-h-screen" data-testid="lobby-page">
+      {/* Hero Section */}
+      <section className="hero-section hero-gradient py-16 md:py-24">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="grid lg:grid-cols-2 gap-12 items-center">
+            {/* Left Content */}
+            <div className="animate-fade-in">
+              <div className="inline-flex items-center gap-2 px-4 py-2 bg-white/80 backdrop-blur-sm rounded-full border border-purple-100 mb-6">
+                <Zap className="w-4 h-4 text-[#836EF9]" />
+                <span className="text-sm font-medium text-gray-700">Powered by OpenClaw</span>
+              </div>
+              
+              <h1 className="font-heading text-4xl sm:text-5xl lg:text-6xl font-bold text-gray-900 mb-6 leading-tight">
+                Compete. Win.
+                <br />
+                <span className="text-[#836EF9]">Earn MON.</span>
+              </h1>
+              
+              <p className="text-lg text-gray-600 mb-8 max-w-lg">
+                Join wagered tournaments on Monad. Fair brackets, instant payouts, 
+                and Proof of W NFTs for champions. All powered by autonomous AI agents.
+              </p>
+              
+              <div className="flex flex-wrap gap-4">
+                <Link to={openArenas[0] ? `/arena/${openArenas[0].address}` : '/admin'}>
+                  <Button className="btn-primary text-base px-6 py-3" data-testid="hero-join-btn">
+                    {openArenas.length > 0 ? 'Join Tournament' : 'Create Tournament'}
+                    <ArrowRight className="w-5 h-5 ml-2" />
+                  </Button>
+                </Link>
+                <Link to="/leaderboard">
+                  <Button variant="outline" className="text-base px-6 py-3 border-gray-200 hover:border-purple-200 hover:bg-purple-50" data-testid="hero-leaderboard-btn">
+                    <Trophy className="w-5 h-5 mr-2 text-[#836EF9]" />
+                    Leaderboard
+                  </Button>
+                </Link>
+              </div>
+            </div>
+
+            {/* Right Stats */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-card animate-fade-in" style={{ animationDelay: '0.1s' }}>
+                <div className="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center mb-4">
+                  <Trophy className="w-6 h-6 text-[#836EF9]" />
+                </div>
+                <p className="font-heading text-3xl font-bold text-gray-900">{stats.totalArenas}</p>
+                <p className="text-sm text-gray-500 mt-1">Total Arenas</p>
+              </div>
+              
+              <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-card animate-fade-in" style={{ animationDelay: '0.2s' }}>
+                <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center mb-4">
+                  <Users className="w-6 h-6 text-green-600" />
+                </div>
+                <p className="font-heading text-3xl font-bold text-gray-900">{stats.totalPlayers}</p>
+                <p className="text-sm text-gray-500 mt-1">Total Players</p>
+              </div>
+              
+              <div className="col-span-2 bg-gradient-to-r from-[#836EF9] to-[#6D5ACF] rounded-2xl p-6 text-white animate-fade-in" style={{ animationDelay: '0.3s' }}>
+                <div className="flex items-center gap-3 mb-2">
+                  <Coins className="w-6 h-6" />
+                  <span className="text-white/80">Total Prize Pool</span>
+                </div>
+                <p className="font-heading text-4xl font-bold">{formatMON(stats.totalPrizePool)} MON</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Open Arenas */}
+      <section className="py-16 bg-white" data-testid="open-arenas-section">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between mb-8">
+            <div>
+              <h2 className="font-heading text-2xl font-bold text-gray-900">Open Tournaments</h2>
+              <p className="text-gray-500 mt-1">Join now and compete for prizes</p>
+            </div>
+            <Link to="/admin">
+              <Button variant="outline" className="border-purple-200 text-[#836EF9] hover:bg-purple-50" data-testid="create-arena-btn">
+                <Plus className="w-4 h-4 mr-2" />
+                Create Arena
+              </Button>
+            </Link>
+          </div>
+
+          {loading ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="arena-card">
+                  <Skeleton className="h-6 w-3/4 mb-2" />
+                  <Skeleton className="h-4 w-1/2 mb-4" />
+                  <div className="grid grid-cols-2 gap-4 mb-6">
+                    <Skeleton className="h-20" />
+                    <Skeleton className="h-20" />
+                  </div>
+                  <Skeleton className="h-10 w-full" />
+                </div>
+              ))}
+            </div>
+          ) : openArenas.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {openArenas.map((arena) => (
+                <ArenaCard key={arena.address} arena={arena} />
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <div className="empty-state-icon">
+                <Trophy className="w-8 h-8 text-[#836EF9]" />
+              </div>
+              <h3 className="font-heading text-xl font-semibold text-gray-900 mb-2">No Open Tournaments</h3>
+              <p className="text-gray-500 mb-6">Be the first to create a tournament!</p>
+              <Link to="/admin">
+                <Button className="btn-primary" data-testid="empty-create-btn">
+                  <Plus className="w-4 h-4 mr-2" />
+                  Create Tournament
+                </Button>
+              </Link>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* Past Arenas */}
+      {closedArenas.length > 0 && (
+        <section className="py-16 bg-gray-50" data-testid="past-arenas-section">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="mb-8">
+              <h2 className="font-heading text-2xl font-bold text-gray-900">Past Tournaments</h2>
+              <p className="text-gray-500 mt-1">View results and winners</p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {closedArenas.slice(0, 6).map((arena) => (
+                <ArenaCard key={arena.address} arena={arena} />
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Top Players Preview */}
+      {topPlayers.length > 0 && (
+        <section className="py-16 bg-white" data-testid="top-players-section">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex items-center justify-between mb-8">
+              <div>
+                <h2 className="font-heading text-2xl font-bold text-gray-900">Top Champions</h2>
+                <p className="text-gray-500 mt-1">Highest earning players</p>
+              </div>
+              <Link to="/leaderboard">
+                <Button variant="ghost" className="text-[#836EF9] hover:bg-purple-50" data-testid="view-all-leaderboard-btn">
+                  View All
+                  <ArrowRight className="w-4 h-4 ml-2" />
+                </Button>
+              </Link>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {topPlayers.map((player, index) => (
+                <div key={player.address} className="bg-white border border-gray-100 rounded-2xl p-6 shadow-card hover:shadow-card-hover transition-shadow">
+                  <div className="flex items-center gap-4">
+                    <div className={`leaderboard-rank ${index === 0 ? 'gold' : index === 1 ? 'silver' : 'bronze'}`}>
+                      {index + 1}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-mono text-sm text-gray-900 truncate">{player.address}</p>
+                      <p className="text-xs text-gray-500">{player.tournaments_won} wins</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-heading font-bold text-[#836EF9]">{formatMON(player.total_payouts)}</p>
+                      <p className="text-xs text-gray-500">MON</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
+    </div>
+  );
+};
+
+export default LobbyPage;
