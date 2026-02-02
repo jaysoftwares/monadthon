@@ -93,6 +93,7 @@ module.exports = {
                 'accordion-up': 'accordion-up 0.2s ease-out',
                 'fade-in': 'fade-in 0.3s ease-out',
                 'slide-in': 'slide-in 0.3s ease-out',
+                'gradient': 'gradient 2s ease-in-out infinite',
             },
             boxShadow: {
                 'card': '0 4px 20px rgba(0, 0, 0, 0.04)',
