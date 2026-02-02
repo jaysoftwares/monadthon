@@ -1,0 +1,205 @@
+{
+  "total_tests": 13,
+  "passed_tests": 13,
+  "failed_tests": 0,
+  "success_rate": 100.0,
+  "test_details": [
+    {
+      "test": "Health Check",
+      "success": true,
+      "details": "Status: 200",
+      "response_data": {
+        "status": "healthy",
+        "service": "claw-arena-api",
+        "timestamp": "2026-02-02T18:29:53.933805+00:00"
+      }
+    },
+    {
+      "test": "Get Arenas (Empty)",
+      "success": true,
+      "details": "Status: 200",
+      "response_data": []
+    },
+    {
+      "test": "Get Leaderboard",
+      "success": true,
+      "details": "Status: 200",
+      "response_data": []
+    },
+    {
+      "test": "Create Arena (No Admin Key)",
+      "success": true,
+      "details": "Status: 401",
+      "response_data": {
+        "detail": "Invalid admin API key"
+      }
+    },
+    {
+      "test": "Create Arena",
+      "success": true,
+      "details": "Status: 200",
+      "response_data": {
+        "id": "343fcbe4-f9ff-4eba-bf09-53b2a6e19fe2",
+        "address": "0x2de82720dcdca4d034457ee9923ad061b59d9b3c",
+        "name": "Test Arena 182954",
+        "entry_fee": "100000000000000000",
+        "max_players": 8,
+        "protocol_fee_bps": 250,
+        "treasury": "0x742d35Cc6634C0532925a3b844Bc9e7595f3F4D0",
+        "players": [],
+        "is_closed": false,
+        "is_finalized": false,
+        "created_at": "2026-02-02T18:29:54.118178+00:00",
+        "closed_at": null,
+        "finalized_at": null,
+        "winners": [],
+        "payouts": [],
+        "tx_hash": null
+      }
+    },
+    {
+      "test": "Get Arenas (With Data)",
+      "success": true,
+      "details": "Status: 200",
+      "response_data": [
+        {
+          "id": "343fcbe4-f9ff-4eba-bf09-53b2a6e19fe2",
+          "address": "0x2de82720dcdca4d034457ee9923ad061b59d9b3c",
+          "name": "Test Arena 182954",
+          "entry_fee": "100000000000000000",
+          "max_players": 8,
+          "protocol_fee_bps": 250,
+          "treasury": "0x742d35Cc6634C0532925a3b844Bc9e7595f3F4D0",
+          "players": [],
+          "is_closed": false,
+          "is_finalized": false,
+          "created_at": "2026-02-02T18:29:54.118178+00:00",
+          "closed_at": null,
+          "finalized_at": null,
+          "winners": [],
+          "payouts": [],
+          "tx_hash": null
+        }
+      ]
+    },
+    {
+      "test": "Get Specific Arena",
+      "success": true,
+      "details": "Status: 200",
+      "response_data": {
+        "id": "343fcbe4-f9ff-4eba-bf09-53b2a6e19fe2",
+        "address": "0x2de82720dcdca4d034457ee9923ad061b59d9b3c",
+        "name": "Test Arena 182954",
+        "entry_fee": "100000000000000000",
+        "max_players": 8,
+        "protocol_fee_bps": 250,
+        "treasury": "0x742d35Cc6634C0532925a3b844Bc9e7595f3F4D0",
+        "players": [],
+        "is_closed": false,
+        "is_finalized": false,
+        "created_at": "2026-02-02T18:29:54.118178+00:00",
+        "closed_at": null,
+        "finalized_at": null,
+        "winners": [],
+        "payouts": [],
+        "tx_hash": null
+      }
+    },
+    {
+      "test": "Get Arena Players",
+      "success": true,
+      "details": "Status: 200",
+      "response_data": {
+        "arena_address": "0x2de82720dcdca4d034457ee9923ad061b59d9b3c",
+        "players": []
+      }
+    },
+    {
+      "test": "Join Arena",
+      "success": true,
+      "details": "Status: 200",
+      "response_data": {
+        "success": true,
+        "message": "Player joined arena",
+        "tx_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "test": "Join Arena Twice (Should Fail)",
+      "success": true,
+      "details": "Status: 400",
+      "response_data": {
+        "detail": "Player already joined"
+      }
+    },
+    {
+      "test": "Close Arena",
+      "success": true,
+      "details": "Status: 200",
+      "response_data": {
+        "success": true,
+        "message": "Arena registration closed"
+      }
+    },
+    {
+      "test": "Request Finalize Signature",
+      "success": true,
+      "details": "Status: 200",
+      "response_data": {
+        "arena_address": "0x2de82720dcdca4d034457ee9923ad061b59d9b3c",
+        "winners": [
+          "0x1234567890123456789012345678901234567890"
+        ],
+        "amounts": [
+          "90000000000000000"
+        ],
+        "nonce": 1,
+        "signature": "0xba943ac2159edbdebf583e54d08cf938747552db4c8814e39342c1500851280e7305ad4c89d47d1144cfe44a90430d41f3c5767bc021fdf7db359e5cc3f85ab99c",
+        "operator_address": "0x742d35Cc6634C0532925a3b844Bc9e7595f3F4D0",
+        "domain": {
+          "name": "ClawArena",
+          "version": "1",
+          "chainId": 10143,
+          "verifyingContract": "0x2de82720dcdca4d034457ee9923ad061b59d9b3c"
+        },
+        "types": {
+          "Finalize": [
+            {
+              "name": "arena",
+              "type": "address"
+            },
+            {
+              "name": "winnersHash",
+              "type": "bytes32"
+            },
+            {
+              "name": "amountsHash",
+              "type": "bytes32"
+            },
+            {
+              "name": "nonce",
+              "type": "uint256"
+            }
+          ]
+        },
+        "message": {
+          "arena": "0x2de82720dcdca4d034457ee9923ad061b59d9b3c",
+          "winnersHash": "0x21f9cf6aab4b051de0aa1a6abcc3bc59761a9a622f9951291091fe7c9646ad41",
+          "amountsHash": "0xe654745f50aff20fffff09208e2a3278413fcc20ab1aae6ed5ef0acf040fccd0",
+          "nonce": 1
+        }
+      }
+    },
+    {
+      "test": "Get Non-existent Arena",
+      "success": true,
+      "details": "Status: 404",
+      "response_data": {
+        "detail": "Arena not found"
+      }
+    }
+  ],
+  "created_arenas": [
+    "0x2de82720dcdca4d034457ee9923ad061b59d9b3c"
+  ]
+}
