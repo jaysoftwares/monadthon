@@ -1,0 +1,130 @@
+{
+  "identity": {
+    "name": "E1",
+    "role": "Creative Designer",
+    "mission": "Create a polished, competitive, and trustworthy Web3 tournament platform on Monad.",
+    "tone": "Futuristic, Clean, High-Energy, Professional",
+    "principles": [
+      "Fusion over Imitation: Mix Swiss Design with Gaming Aesthetics.",
+      "Emotion First: Every interaction should feel 'live' and 'high-stakes'.",
+      "Content is King: The Tournament Bracket is the hero.",
+      "Negative Space: Use white space to create a premium feel."
+    ]
+  },
+  "typography": {
+    "headings": {
+      "font_family": "Space Grotesk, sans-serif",
+      "weights": ["600", "700"],
+      "usage": "Page titles, Section headers, Tournament names",
+      "letter_spacing": "tracking-tight"
+    },
+    "body": {
+      "font_family": "DM Sans, sans-serif",
+      "weights": ["400", "500"],
+      "usage": "Descriptions, Rules, Player names",
+      "letter_spacing": "tracking-normal"
+    },
+    "monospace": {
+      "font_family": "JetBrains Mono, monospace",
+      "weights": ["400"],
+      "usage": "Wallet addresses, Transaction hashes, IDs"
+    }
+  },
+  "colors": {
+    "theme": "light",
+    "palette": {
+      "primary": {
+        "default": "#836EF9",
+        "hover": "#6D5ACF",
+        "foreground": "#FFFFFF",
+        "description": "Monad Purple - Main Brand Color"
+      },
+      "background": {
+        "default": "#FFFFFF",
+        "subtle": "#F5F3FF",
+        "description": "Clean White with very pale lavender tints"
+      },
+      "text": {
+        "primary": "#0F0F11",
+        "secondary": "#4B5563",
+        "muted": "#9CA3AF"
+      },
+      "accent": {
+        "success": "#10B981",
+        "warning": "#F59E0B",
+        "error": "#EF4444",
+        "live": "#FF3B30"
+      },
+      "border": {
+        "default": "#E5E7EB",
+        "active": "#836EF9"
+      }
+    },
+    "gradients": {
+      "hero": "linear-gradient(135deg, #FFFFFF 0%, #F3F0FF 100%)",
+      "card_hover": "linear-gradient(180deg, rgba(131, 110, 249, 0.05) 0%, rgba(131, 110, 249, 0.1) 100%)"
+    }
+  },
+  "layout": {
+    "spacing_scale": "Generous (2x standard)",
+    "container_padding": "p-6 md:p-12",
+    "grid_system": {
+      "lobby": "grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8",
+      "arena_header": "flex flex-col md:flex-row justify-between items-end gap-6",
+      "bracket_view": "overflow-x-auto py-8 min-h-[400px] flex items-center"
+    },
+    "border_radius": {
+      "default": "rounded-xl",
+      "button": "rounded-lg",
+      "card": "rounded-2xl"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-[#836EF9] text-white hover:bg-[#6D5ACF] shadow-lg shadow-purple-500/20 transition-all active:scale-95",
+      "secondary": "bg-white text-[#0F0F11] border border-gray-200 hover:bg-gray-50 hover:border-purple-200",
+      "ghost": "text-[#4B5563] hover:text-[#836EF9] hover:bg-purple-50"
+    },
+    "cards": {
+      "base": "bg-white border border-gray-100 shadow-sm hover:shadow-md hover:border-purple-200 transition-all duration-300",
+      "tournament_card": "group relative overflow-hidden p-6 flex flex-col gap-4"
+    },
+    "inputs": {
+      "base": "bg-gray-50 border-gray-200 focus:border-[#836EF9] focus:ring-2 focus:ring-purple-100 rounded-lg"
+    },
+    "badges": {
+      "status_open": "bg-green-100 text-green-700 border-green-200",
+      "status_live": "bg-red-100 text-red-700 border-red-200 animate-pulse",
+      "status_ended": "bg-gray-100 text-gray-600 border-gray-200"
+    }
+  },
+  "assets": {
+    "logo_mark": {
+      "url": "https://images.unsplash.com/photo-1759270463193-79e06930842e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwzfHxhYnN0cmFjdCUyMGdlb21ldHJpYyUyMHB1cnBsZSUyMHNoYXBlcyUyMHdoaXRlJTIwYmFja2dyb3VuZCUyMHRleHR1cmV8ZW58MHx8fHwxNzcwMDU2MjExfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Abstract geometric purple pattern to be used as a brand mark or masked logo element."
+    },
+    "hero_texture": {
+      "url": "https://images.unsplash.com/photo-1759031807436-bffa8890cc5c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGdlb21ldHJpYyUyMHB1cnBsZSUyMHNoYXBlcyUyMHdoaXRlJTIwYmFja2dyb3VuZCUyMHRleHR1cmV8ZW58MHx8fHwxNzcwMDU2MjExfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Soft purple/white abstract texture for hero backgrounds or section dividers."
+    }
+  },
+  "visual_enhancers": {
+    "glassmorphism": "backdrop-blur-md bg-white/80 border border-white/20",
+    "shadows": "shadow-[0_8px_30px_rgb(0,0,0,0.04)]",
+    "gradients": "Use subtle mesh gradients of white and pale lavender (#F3F0FF) to avoid flatness."
+  },
+  "instructions_to_main_agent": [
+    "1. INSTALL FONTS: Add 'Space Grotesk' and 'DM Sans' via Google Fonts in index.html or Next.js font optimizer.",
+    "2. THEME SETUP: Update tailwind.config.js to use the specific Monad Purple (#836EF9) as 'primary'.",
+    "3. LOBBY DESIGN: Create a 'Bento' grid for the tournament list. Use the 'hero_texture' as a subtle background for the page header.",
+    "4. BRACKET UI: Build a custom bracket component using Flexbox/Grid. Do NOT use a library if it looks generic. Use thin gray lines (#E5E7EB) for connectors.",
+    "5. WALLET CONNECT: Style the Connect Button to be the most prominent action in the header (Solid Purple).",
+    "6. DO NOT use dark mode by default. The user explicitly requested a White + Monad Purple theme."
+  ],
+  "universal_guidelines": [
+    "Avoid 'AI Slop': Do not use generic centered layouts. Use asymmetry.",
+    "No Inter for Headings: Use Space Grotesk.",
+    "Micro-Interactions: Add hover states to every card and button.",
+    "Data-TestID: Add data-testid to all interactive elements."
+  ]
+}
