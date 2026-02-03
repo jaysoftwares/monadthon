@@ -45,7 +45,9 @@ NETWORK_CONFIG = {
     }
 }
 
-# OpenClaw Configuration
+# Agent Signer Configuration
+# Can use either the built-in agent_signer.py or OpenClaw Gateway
+AGENT_SIGNER_URL = os.environ.get('AGENT_SIGNER_URL', 'http://localhost:8002')
 OPENCLAW_API_URL = os.environ.get('OPENCLAW_API_URL', '')
 OPENCLAW_API_KEY = os.environ.get('OPENCLAW_API_KEY', '')
 OPERATOR_ADDRESS = os.environ.get('OPERATOR_ADDRESS', '')
@@ -170,10 +172,10 @@ def get_network_config(network: str) -> NetworkConfig:
     return NetworkConfig(**config)
 
 # ===========================================
-# OPENCLAW INTEGRATION
+# AGENT SIGNING SERVICE
 # ===========================================
 
-async def request_openclaw_signature(
+async def request_agent_signature(
     arena_address: str,
     winners: List[str],
     amounts: List[str],
@@ -181,68 +183,49 @@ async def request_openclaw_signature(
     chain_id: int
 ) -> dict:
     """
-    Request EIP-712 signature from OpenClaw API.
+    Request EIP-712 signature from Agent Signer service.
+    Uses the built-in agent_signer.py or OpenClaw Gateway.
     Returns signature data for finalize transaction.
     """
-    if not OPENCLAW_API_URL or not OPENCLAW_API_KEY:
+    # Try agent signer first, then OpenClaw
+    signer_url = AGENT_SIGNER_URL or OPENCLAW_API_URL
+
+    if not signer_url:
         raise HTTPException(
             status_code=500,
-            detail="OpenClaw API not configured. Set OPENCLAW_API_URL and OPENCLAW_API_KEY."
+            detail="No signing service configured. Set AGENT_SIGNER_URL or OPENCLAW_API_URL."
         )
 
-    # EIP-712 Domain
-    domain = {
-        "name": "ClawArena",
-        "version": "1",
-        "chainId": chain_id,
-        "verifyingContract": arena_address
-    }
-
-    # EIP-712 Types
-    types = {
-        "Finalize": [
-            {"name": "arena", "type": "address"},
-            {"name": "winnersHash", "type": "bytes32"},
-            {"name": "amountsHash", "type": "bytes32"},
-            {"name": "nonce", "type": "uint256"}
-        ]
-    }
-
-    # Compute hashes
-    winners_hash = "0x" + hashlib.sha256(",".join(winners).encode()).hexdigest()
-    amounts_hash = "0x" + hashlib.sha256(",".join(amounts).encode()).hexdigest()
-
-    # Message to sign
-    message = {
-        "arena": arena_address,
-        "winnersHash": winners_hash,
-        "amountsHash": amounts_hash,
-        "nonce": nonce
-    }
-
-    # Request signature from OpenClaw
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient() as http_client:
         try:
-            response = await client.post(
-                f"{OPENCLAW_API_URL}/sign",
-                headers={
-                    "Authorization": f"Bearer {OPENCLAW_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "domain": domain,
-                    "types": types,
-                    "message": message,
-                    "primaryType": "Finalize"
-                },
+            # Prepare request payload
+            payload = {
+                "arena_address": arena_address,
+                "winners": winners,
+                "amounts": amounts,
+                "nonce": nonce,
+                "chain_id": chain_id
+            }
+
+            # Set headers based on service type
+            headers = {"Content-Type": "application/json"}
+            if OPENCLAW_API_KEY:
+                headers["Authorization"] = f"Bearer {OPENCLAW_API_KEY}"
+
+            logger.info(f"Requesting signature from {signer_url}/sign")
+
+            response = await http_client.post(
+                f"{signer_url}/sign",
+                headers=headers,
+                json=payload,
                 timeout=30.0
             )
 
             if response.status_code != 200:
-                logger.error(f"OpenClaw API error: {response.status_code} - {response.text}")
+                logger.error(f"Signer API error: {response.status_code} - {response.text}")
                 raise HTTPException(
                     status_code=502,
-                    detail=f"OpenClaw API error: {response.text}"
+                    detail=f"Signing service error: {response.text}"
                 )
 
             result = response.json()
@@ -251,21 +234,27 @@ async def request_openclaw_signature(
             if not signature:
                 raise HTTPException(
                     status_code=502,
-                    detail="OpenClaw API did not return a signature"
+                    detail="Signing service did not return a signature"
                 )
+
+            # Update operator address if returned
+            global OPERATOR_ADDRESS
+            if result.get("operator_address") and not OPERATOR_ADDRESS:
+                OPERATOR_ADDRESS = result.get("operator_address")
 
             return {
                 "signature": signature,
-                "domain": domain,
-                "types": types,
-                "message": message
+                "operator_address": result.get("operator_address", OPERATOR_ADDRESS),
+                "domain": result.get("domain", {}),
+                "types": result.get("types", {}),
+                "message": result.get("message", {})
             }
 
         except httpx.RequestError as e:
-            logger.error(f"OpenClaw API request failed: {e}")
+            logger.error(f"Signing service request failed: {e}")
             raise HTTPException(
                 status_code=502,
-                detail=f"Failed to connect to OpenClaw API: {str(e)}"
+                detail=f"Failed to connect to signing service: {str(e)}. Make sure agent_signer.py is running."
             )
 
 # ===========================================
@@ -477,8 +466,8 @@ async def request_finalize_signature(request: FinalizeRequest, _: bool = Depends
         "created_at": datetime.now(timezone.utc).isoformat()
     })
 
-    # Request signature from OpenClaw
-    signature_data = await request_openclaw_signature(
+    # Request signature from agent signer
+    signature_data = await request_agent_signature(
         arena_address=request.arena_address,
         winners=request.winners,
         amounts=request.amounts,
@@ -494,7 +483,7 @@ async def request_finalize_signature(request: FinalizeRequest, _: bool = Depends
         amounts=request.amounts,
         nonce=nonce,
         signature=signature_data["signature"],
-        operator_address=OPERATOR_ADDRESS,
+        operator_address=signature_data.get("operator_address", OPERATOR_ADDRESS),
         domain=signature_data["domain"],
         types=signature_data["types"],
         message=signature_data["message"]
