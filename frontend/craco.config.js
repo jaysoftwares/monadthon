@@ -48,19 +48,6 @@ const webpackConfig = {
     },
     configure: (webpackConfig) => {
 
-      // Add ignored patterns to reduce watched directories
-        webpackConfig.watchOptions = {
-          ...webpackConfig.watchOptions,
-          ignored: [
-            '**/node_modules/**',
-            '**/.git/**',
-            '**/build/**',
-            '**/dist/**',
-            '**/coverage/**',
-            '**/public/**',
-        ],
-      };
-
       // Fix for Reown AppKit / WalletConnect dynamic imports
       // Prevents chunk loading errors with phosphor-icons
       webpackConfig.module.rules.push({
@@ -76,23 +63,24 @@ const webpackConfig = {
         buffer: require.resolve('buffer/'),
       };
 
-      // Prevent code splitting for @reown and phosphor-icons to avoid chunk loading errors
-      webpackConfig.optimization = {
-        ...webpackConfig.optimization,
-        splitChunks: {
-          ...webpackConfig.optimization?.splitChunks,
-          cacheGroups: {
-            ...webpackConfig.optimization?.splitChunks?.cacheGroups,
-            // Bundle all @reown packages together
-            reown: {
-              test: /[\\/]node_modules[\\/](@reown|@walletconnect|phosphor-icons)[\\/]/,
-              name: 'reown-wallet',
-              chunks: 'all',
-              priority: 20,
+      // Only apply chunk optimization in production to avoid slow dev server
+      if (!isDevServer) {
+        webpackConfig.optimization = {
+          ...webpackConfig.optimization,
+          splitChunks: {
+            ...webpackConfig.optimization?.splitChunks,
+            cacheGroups: {
+              ...webpackConfig.optimization?.splitChunks?.cacheGroups,
+              reown: {
+                test: /[\\/]node_modules[\\/](@reown|@walletconnect|phosphor-icons)[\\/]/,
+                name: 'reown-wallet',
+                chunks: 'all',
+                priority: 20,
+              },
             },
           },
-        },
-      };
+        };
+      }
 
       // Add health check plugin to webpack if enabled
       if (config.enableHealthCheck && healthPluginInstance) {
