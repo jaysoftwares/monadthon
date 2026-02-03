@@ -61,6 +61,39 @@ const webpackConfig = {
         ],
       };
 
+      // Fix for Reown AppKit / WalletConnect dynamic imports
+      // Prevents chunk loading errors with phosphor-icons
+      webpackConfig.module.rules.push({
+        test: /\.m?js$/,
+        resolve: {
+          fullySpecified: false,
+        },
+      });
+
+      // Ensure proper handling of ESM modules from @reown and @walletconnect
+      webpackConfig.resolve.fallback = {
+        ...webpackConfig.resolve.fallback,
+        buffer: require.resolve('buffer/'),
+      };
+
+      // Prevent code splitting for @reown and phosphor-icons to avoid chunk loading errors
+      webpackConfig.optimization = {
+        ...webpackConfig.optimization,
+        splitChunks: {
+          ...webpackConfig.optimization?.splitChunks,
+          cacheGroups: {
+            ...webpackConfig.optimization?.splitChunks?.cacheGroups,
+            // Bundle all @reown packages together
+            reown: {
+              test: /[\\/]node_modules[\\/](@reown|@walletconnect|phosphor-icons)[\\/]/,
+              name: 'reown-wallet',
+              chunks: 'all',
+              priority: 20,
+            },
+          },
+        },
+      };
+
       // Add health check plugin to webpack if enabled
       if (config.enableHealthCheck && healthPluginInstance) {
         webpackConfig.plugins.push(healthPluginInstance);
