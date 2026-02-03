@@ -60,9 +60,23 @@ export const WalletProvider = ({ children }) => {
     try {
       await disconnectAsync();
     } catch (error) {
-      console.error('Failed to disconnect:', error);
+      // Silently handle disconnect errors - user may have rejected or wallet disconnected
+      if (error?.code !== 4001 && !error?.message?.includes('User rejected')) {
+        console.error('Failed to disconnect:', error);
+      }
     }
   }, [disconnectAsync]);
+
+  // Helper to check if error is user rejection
+  const isUserRejection = (error) => {
+    return (
+      error?.code === 4001 ||
+      error?.message?.includes('User rejected') ||
+      error?.message?.includes('user rejected') ||
+      error?.message?.includes('User denied') ||
+      error?.name === 'UserRejectedRequestError'
+    );
+  };
 
   // Helper to add network to wallet
   const addNetworkToWallet = useCallback(async (targetChain) => {
@@ -81,7 +95,10 @@ export const WalletProvider = ({ children }) => {
       });
       return true;
     } catch (addError) {
-      console.error('Failed to add network:', addError);
+      // Silently handle user rejection
+      if (!isUserRejection(addError)) {
+        console.error('Failed to add network:', addError);
+      }
       return false;
     }
   }, []);
@@ -100,10 +117,15 @@ export const WalletProvider = ({ children }) => {
       await switchChainAsync({ chainId: targetChainId });
       return true;
     } catch (error) {
+      // Silently handle user rejection - this is expected behavior
+      if (isUserRejection(error)) {
+        return false;
+      }
+
       console.error('Failed to switch network:', error);
 
       // If switch fails, try to add the network first
-      if (error.code === 4902 || error.message?.includes('Unrecognized chain')) {
+      if (error?.code === 4902 || error?.message?.includes('Unrecognized chain')) {
         const added = await addNetworkToWallet(targetChain);
         if (added) {
           // Try switching again after adding
@@ -111,7 +133,9 @@ export const WalletProvider = ({ children }) => {
             await switchChainAsync({ chainId: targetChainId });
             return true;
           } catch (retryError) {
-            console.error('Failed to switch after adding network:', retryError);
+            if (!isUserRejection(retryError)) {
+              console.error('Failed to switch after adding network:', retryError);
+            }
           }
         }
       }
