@@ -1,0 +1,16 @@
+# Hardhat
+node_modules/
+artifacts/
+cache/
+typechain-types/
+deployments/*.json
+
+# Foundry
+out/
+lib/
+
+# Environment
+.env
+
+# Editor
+.vscode/
