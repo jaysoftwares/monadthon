@@ -12,6 +12,7 @@ module.exports = {
   solidity: {
     version: "0.8.20",
     settings: {
+      viaIR: true, // Required to avoid "stack too deep" in finalize()
       optimizer: {
         enabled: true,
         runs: 200,
