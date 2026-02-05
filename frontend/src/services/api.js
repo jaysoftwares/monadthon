@@ -94,6 +94,17 @@ export const recordFinalize = async (address, txHash, winners, amounts) => {
   return response.data;
 };
 
+// Agent endpoints
+export const getAgentStatus = async () => {
+  const response = await apiClient.get('/agent/status');
+  return response.data;
+};
+
+export const getAgentSchedule = async () => {
+  const response = await apiClient.get('/agent/schedule');
+  return response.data;
+};
+
 // Helper functions
 export const formatMON = (weiString) => {
   if (!weiString) return '0';

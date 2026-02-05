@@ -1,53 +1,70 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { getArenas, getLeaderboard, formatMON } from '../services/api';
+import { getArenas, getLeaderboard, getAgentStatus, formatMON } from '../services/api';
 import ArenaCard from '../components/ArenaCard';
+import CountdownTimer from '../components/CountdownTimer';
 import { Button } from '../components/ui/button';
 import { Skeleton } from '../components/ui/skeleton';
-import { Trophy, Users, Coins, Zap, ArrowRight, Plus } from 'lucide-react';
+import { Trophy, Users, Coins, Zap, ArrowRight, Plus, Bot, Activity } from 'lucide-react';
 
 const LobbyPage = () => {
   const [arenas, setArenas] = useState([]);
   const [topPlayers, setTopPlayers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [agentStatus, setAgentStatus] = useState(null);
   const [stats, setStats] = useState({
     totalArenas: 0,
     totalPlayers: 0,
     totalPrizePool: '0',
   });
 
+  const fetchData = useCallback(async () => {
+    try {
+      const [arenasData, leaderboardData] = await Promise.all([
+        getArenas(),
+        getLeaderboard(3),
+      ]);
+
+      setArenas(arenasData);
+      setTopPlayers(leaderboardData);
+
+      // Calculate stats
+      const totalPlayers = arenasData.reduce((acc, arena) => acc + (arena.players?.length || 0), 0);
+      const totalPrizePool = arenasData.reduce((acc, arena) => {
+        const playerCount = arena.players?.length || 0;
+        return acc + BigInt(arena.entry_fee || '0') * BigInt(playerCount);
+      }, BigInt(0));
+
+      setStats({
+        totalArenas: arenasData.length,
+        totalPlayers,
+        totalPrizePool: totalPrizePool.toString(),
+      });
+    } catch (error) {
+      console.error('Failed to fetch data:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    const fetchData = async () => {
+    fetchData();
+
+    // Fetch agent status
+    const fetchAgentStatus = async () => {
       try {
-        const [arenasData, leaderboardData] = await Promise.all([
-          getArenas(),
-          getLeaderboard(3),
-        ]);
-        
-        setArenas(arenasData);
-        setTopPlayers(leaderboardData);
-        
-        // Calculate stats
-        const totalPlayers = arenasData.reduce((acc, arena) => acc + (arena.players?.length || 0), 0);
-        const totalPrizePool = arenasData.reduce((acc, arena) => {
-          const playerCount = arena.players?.length || 0;
-          return acc + BigInt(arena.entry_fee || '0') * BigInt(playerCount);
-        }, BigInt(0));
-        
-        setStats({
-          totalArenas: arenasData.length,
-          totalPlayers,
-          totalPrizePool: totalPrizePool.toString(),
-        });
+        const status = await getAgentStatus();
+        setAgentStatus(status);
       } catch (error) {
-        console.error('Failed to fetch data:', error);
-      } finally {
-        setLoading(false);
+        // Agent status is optional - don't fail if unavailable
       }
     };
+    fetchAgentStatus();
 
-    fetchData();
-  }, []);
+    // Refresh agent status every 30 seconds
+    const agentInterval = setInterval(fetchAgentStatus, 30000);
+    return () => clearInterval(agentInterval);
+  }, [fetchData]);
 
   const openArenas = arenas.filter(a => !a.is_closed && !a.is_finalized);
   const closedArenas = arenas.filter(a => a.is_closed || a.is_finalized);
@@ -121,6 +138,61 @@ const LobbyPage = () => {
           </div>
         </div>
       </section>
+
+      {/* Agent Status Banner */}
+      {agentStatus && agentStatus.agent_status === 'active' && (
+        <section className="py-6 bg-gradient-to-r from-purple-50 via-white to-indigo-50 border-b border-purple-100" data-testid="agent-status-section">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-[#836EF9] rounded-xl flex items-center justify-center">
+                  <Bot className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <p className="font-heading font-semibold text-gray-900">Claw Arena Host</p>
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-xs font-medium">
+                      <Activity className="w-3 h-3" />
+                      Active
+                    </span>
+                  </div>
+                  <p className="text-sm text-gray-500">
+                    Autonomous tournament director
+                    {agentStatus.tournaments_created_today > 0 && (
+                      <span> &middot; {agentStatus.tournaments_created_today} created today</span>
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              {agentStatus.next_tournament_at && (
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-500">Next tournament in</span>
+                  <CountdownTimer
+                    targetTime={agentStatus.next_tournament_at}
+                    variant="inline"
+                    onComplete={fetchData}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Next Tournament Countdown Banner - shown when no open arenas */}
+      {!loading && openArenas.length === 0 && agentStatus?.next_tournament_at && (
+        <section className="py-8 bg-white" data-testid="next-tournament-banner">
+          <div className="max-w-xl mx-auto px-4">
+            <CountdownTimer
+              targetTime={agentStatus.next_tournament_at}
+              label="Next Tournament Starts In"
+              variant="banner"
+              onComplete={fetchData}
+            />
+          </div>
+        </section>
+      )}
 
       {/* Open Arenas */}
       <section className="py-16 bg-white" data-testid="open-arenas-section">

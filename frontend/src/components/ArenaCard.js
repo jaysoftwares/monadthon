@@ -2,7 +2,8 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
-import { Users, Coins, ArrowRight, Clock } from 'lucide-react';
+import CountdownTimer from './CountdownTimer';
+import { Users, Coins, ArrowRight, Clock, Bot } from 'lucide-react';
 import { formatMON, getExplorerUrl } from '../services/api';
 
 const ArenaCard = ({ arena }) => {
@@ -94,9 +95,23 @@ const ArenaCard = ({ arena }) => {
         </div>
       </div>
 
+      {/* Countdown Timer */}
+      {!arena.is_finalized && arena.registration_deadline && !arena.is_closed && (
+        <div className="flex items-center justify-between mb-4 px-1">
+          <span className="text-xs text-gray-500">Registration closes in</span>
+          <CountdownTimer targetTime={arena.registration_deadline} variant="inline" />
+        </div>
+      )}
+      {arena.is_closed && !arena.is_finalized && arena.tournament_end_estimate && (
+        <div className="flex items-center justify-between mb-4 px-1">
+          <span className="text-xs text-gray-500">Tournament ends in</span>
+          <CountdownTimer targetTime={arena.tournament_end_estimate} variant="inline" />
+        </div>
+      )}
+
       {/* Action */}
       <Link to={`/arena/${arena.address}`}>
-        <Button 
+        <Button
           className="w-full btn-primary group-hover:shadow-lg transition-shadow"
           data-testid={`view-arena-btn-${arena.address}`}
         >
@@ -105,10 +120,18 @@ const ArenaCard = ({ arena }) => {
         </Button>
       </Link>
 
-      {/* Timestamp */}
-      <div className="mt-4 flex items-center gap-1 text-xs text-gray-400">
-        <Clock className="w-3 h-3" />
-        Created {new Date(arena.created_at).toLocaleDateString()}
+      {/* Footer: Timestamp + Agent Badge */}
+      <div className="mt-4 flex items-center justify-between text-xs text-gray-400">
+        <div className="flex items-center gap-1">
+          <Clock className="w-3 h-3" />
+          Created {new Date(arena.created_at).toLocaleDateString()}
+        </div>
+        {arena.created_by === 'agent' && (
+          <div className="flex items-center gap-1 text-[#836EF9]">
+            <Bot className="w-3 h-3" />
+            <span>Agent</span>
+          </div>
+        )}
       </div>
     </div>
   );
