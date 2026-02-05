@@ -3,7 +3,9 @@ require("@nomicfoundation/hardhat-verify");
 require("dotenv").config();
 
 const PRIVATE_KEY = process.env.DEPLOYER_PRIVATE_KEY || "0x" + "0".repeat(64);
-const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY || "placeholder";
+// Etherscan API key is OPTIONAL - Sourcify verification works without it
+const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY || "";
+const hasEtherscanKey = ETHERSCAN_API_KEY.length > 0;
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
@@ -51,9 +53,9 @@ module.exports = {
     browserUrl: "https://testnet.monadvision.com",
   },
 
-  // Etherscan verification (Monadscan)
+  // Etherscan verification (Monadscan) - only enabled if API key is provided
   etherscan: {
-    enabled: true,
+    enabled: hasEtherscanKey,
     apiKey: {
       monadTestnet: ETHERSCAN_API_KEY,
       monadMainnet: ETHERSCAN_API_KEY,
