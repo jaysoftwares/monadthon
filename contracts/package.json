@@ -1,0 +1,20 @@
+{
+  "name": "claw-arena-contracts",
+  "version": "1.0.0",
+  "description": "CLAW ARENA smart contracts - Hardhat deployment for Monad",
+  "scripts": {
+    "compile": "npx hardhat compile",
+    "test": "npx hardhat test",
+    "deploy:testnet": "npx hardhat run scripts/deploy.js --network monadTestnet",
+    "deploy:mainnet": "npx hardhat run scripts/deploy.js --network monadMainnet",
+    "verify:testnet": "npx hardhat run scripts/verify.js --network monadTestnet",
+    "verify:mainnet": "npx hardhat run scripts/verify.js --network monadMainnet"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.0.0",
+    "@openzeppelin/contracts": "^5.1.0",
+    "hardhat": "^2.22.19",
+    "dotenv": "^16.4.7"
+  }
+}
