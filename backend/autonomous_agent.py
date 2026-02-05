@@ -1,14 +1,16 @@
 """
-CLAW ARENA - Autonomous Tournament Agent
+CLAW ARENA - Autonomous Tournament Director Agent
 
-This agent autonomously creates and manages tournaments based on:
+This agent is the PRIMARY CREATOR and DIRECTOR of tournaments.
+It autonomously creates and manages tournaments based on:
 - Historical tournament performance data
 - Time-of-day and day-of-week patterns
 - User activity and participation rates
 - Market conditions and entry fee optimization
 
-The agent runs on a configurable schedule and makes intelligent decisions
-about tournament parameters to maximize engagement and platform revenue.
+The agent runs on a configurable schedule, makes intelligent decisions
+about tournament parameters, and maintains visible countdown timers
+for the frontend.
 
 Usage:
     python autonomous_agent.py
@@ -25,10 +27,12 @@ import os
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from dataclasses import dataclass
 from enum import Enum
 import random
+import hashlib
+import time
 import httpx
 from dotenv import load_dotenv
 
@@ -68,6 +72,8 @@ class TournamentConfig:
     protocol_fee_bps: int
     tier: TournamentTier
     reason: str  # Why the agent chose these parameters
+    registration_deadline_minutes: int = 60  # How long registration stays open
+    tournament_duration_minutes: int = 120  # Estimated total tournament time
 
 
 @dataclass
@@ -119,6 +125,15 @@ class TournamentAnalytics:
         TournamentTier.MEDIUM: [4, 8],
         TournamentTier.LARGE: [4, 8],
         TournamentTier.WHALE: [4],
+    }
+
+    # Registration deadline (minutes) by tier
+    TIER_REGISTRATION = {
+        TournamentTier.MICRO: [30, 45],
+        TournamentTier.SMALL: [45, 60],
+        TournamentTier.MEDIUM: [60, 90],
+        TournamentTier.LARGE: [60, 120],
+        TournamentTier.WHALE: [120, 180],
     }
 
     # Peak hours (UTC) - typically evenings in major timezones
@@ -284,6 +299,13 @@ class TournamentAnalytics:
         else:
             protocol_fee_bps = 300  # 3%
 
+        # Registration deadline based on tier
+        reg_options = self.TIER_REGISTRATION[tier]
+        reg_deadline = random.randint(reg_options[0], reg_options[1])
+
+        # Tournament duration estimate (registration + competition)
+        tournament_duration = reg_deadline + random.randint(30, 90)
+
         # Build reason string
         reasons = []
         if analysis.is_peak_hours:
@@ -292,6 +314,8 @@ class TournamentAnalytics:
             reasons.append("weekend boost")
         if analysis.avg_fill_rate > 0.7:
             reasons.append("high engagement")
+        elif analysis.avg_fill_rate < 0.3:
+            reasons.append("low engagement - smaller tier")
         reasons.append(f"{analysis.confidence:.0%} confidence")
 
         return TournamentConfig(
@@ -300,12 +324,25 @@ class TournamentAnalytics:
             max_players=analysis.recommended_players,
             protocol_fee_bps=protocol_fee_bps,
             tier=tier,
-            reason=", ".join(reasons)
+            reason=", ".join(reasons),
+            registration_deadline_minutes=reg_deadline,
+            tournament_duration_minutes=tournament_duration,
         )
+
+    def calculate_next_tournament_delay(self, analysis: MarketAnalysis) -> int:
+        """Calculate delay (in minutes) before creating the next tournament"""
+        if analysis.is_peak_hours and analysis.is_weekend:
+            return random.randint(3, 10)
+        elif analysis.is_peak_hours:
+            return random.randint(5, 15)
+        elif analysis.is_weekend:
+            return random.randint(10, 20)
+        else:
+            return random.randint(15, 30)
 
 
 class AutonomousAgent:
-    """The main autonomous agent that creates and manages tournaments"""
+    """The main autonomous agent - PRIMARY TOURNAMENT DIRECTOR"""
 
     def __init__(self):
         self.analytics = TournamentAnalytics()
@@ -315,7 +352,7 @@ class AutonomousAgent:
     async def start(self):
         """Start the autonomous agent"""
         logger.info("=" * 60)
-        logger.info("🤖 CLAW ARENA Autonomous Agent Starting")
+        logger.info("CLAW ARENA Autonomous Tournament Director Starting")
         logger.info(f"   Interval: {AGENT_INTERVAL_MINUTES} minutes")
         logger.info(f"   Min Active: {MIN_TOURNAMENTS_ACTIVE}")
         logger.info(f"   Max Active: {MAX_TOURNAMENTS_ACTIVE}")
@@ -324,17 +361,20 @@ class AutonomousAgent:
         logger.info("=" * 60)
 
         if not ADMIN_API_KEY:
-            logger.error("❌ ADMIN_API_KEY not set. Agent cannot create tournaments.")
+            logger.error("ADMIN_API_KEY not set. Agent cannot create tournaments.")
             return
 
         self.http_client = httpx.AsyncClient(timeout=30.0)
         self.running = True
 
         try:
+            # Run first cycle immediately
+            await self.run_cycle()
+
             while self.running:
-                await self.run_cycle()
-                logger.info(f"💤 Sleeping for {AGENT_INTERVAL_MINUTES} minutes...")
+                logger.info(f"Sleeping for {AGENT_INTERVAL_MINUTES} minutes...")
                 await asyncio.sleep(AGENT_INTERVAL_MINUTES * 60)
+                await self.run_cycle()
         except asyncio.CancelledError:
             logger.info("Agent shutdown requested")
         finally:
@@ -347,7 +387,7 @@ class AutonomousAgent:
 
     async def run_cycle(self):
         """Run one cycle of the agent"""
-        logger.info("🔄 Starting agent cycle...")
+        logger.info("Starting agent cycle...")
 
         try:
             # Fetch current state
@@ -356,7 +396,7 @@ class AutonomousAgent:
 
             # Analyze market
             analysis = self.analytics.analyze_market(arenas, leaderboard)
-            logger.info(f"📊 Market Analysis:")
+            logger.info(f"Market Analysis:")
             logger.info(f"   Hour: {analysis.hour_of_day}, Day: {analysis.day_of_week}")
             logger.info(f"   Peak: {analysis.is_peak_hours}, Weekend: {analysis.is_weekend}")
             logger.info(f"   Active Tournaments: {analysis.active_tournaments}")
@@ -366,34 +406,50 @@ class AutonomousAgent:
 
             # Check if we need to create tournaments
             active_count = analysis.active_tournaments
+            tournaments_created = 0
 
             if active_count >= MAX_TOURNAMENTS_ACTIVE:
-                logger.info(f"⏸️ Max active tournaments reached ({active_count}/{MAX_TOURNAMENTS_ACTIVE})")
-                return
+                logger.info(f"Max active tournaments reached ({active_count}/{MAX_TOURNAMENTS_ACTIVE})")
+            else:
+                # Determine how many to create
+                tournaments_needed = max(0, MIN_TOURNAMENTS_ACTIVE - active_count)
 
-            # Determine how many to create
-            tournaments_needed = max(0, MIN_TOURNAMENTS_ACTIVE - active_count)
+                # During peak hours, be more aggressive
+                if analysis.is_peak_hours and active_count < MAX_TOURNAMENTS_ACTIVE - 1:
+                    tournaments_needed = max(tournaments_needed, 1)
 
-            # During peak hours, be more aggressive
-            if analysis.is_peak_hours and active_count < MAX_TOURNAMENTS_ACTIVE - 1:
-                tournaments_needed = max(tournaments_needed, 1)
+                if tournaments_needed == 0 and analysis.confidence > 0.7 and active_count < MAX_TOURNAMENTS_ACTIVE:
+                    # High confidence, create one more
+                    tournaments_needed = 1
 
-            if tournaments_needed == 0 and analysis.confidence > 0.7 and active_count < MAX_TOURNAMENTS_ACTIVE:
-                # High confidence, create one more
-                tournaments_needed = 1
+                logger.info(f"Planning to create {tournaments_needed} tournament(s)")
 
-            logger.info(f"🎯 Planning to create {tournaments_needed} tournament(s)")
+                # Create tournaments
+                for i in range(tournaments_needed):
+                    config = self.analytics.generate_tournament_config(analysis)
+                    success = await self._create_tournament(config)
+                    if success:
+                        tournaments_created += 1
 
-            # Create tournaments
-            for i in range(tournaments_needed):
-                config = self.analytics.generate_tournament_config(analysis)
-                await self._create_tournament(config)
+            # Calculate next tournament time
+            delay_minutes = self.analytics.calculate_next_tournament_delay(analysis)
+            next_tournament_at = (
+                datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
+            ).isoformat()
+
+            # Update schedule in backend
+            await self._update_schedule(
+                next_tournament_at=next_tournament_at,
+                analysis=analysis,
+            )
+
+            logger.info(f"Next tournament check in ~{delay_minutes} minutes")
 
             # Check for tournaments ready to finalize
             await self._check_finalizations(arenas)
 
         except Exception as e:
-            logger.error(f"❌ Cycle error: {e}")
+            logger.error(f"Cycle error: {e}")
 
     async def _get_arenas(self) -> List[Dict]:
         """Fetch all arenas from backend"""
@@ -424,26 +480,30 @@ class AutonomousAgent:
             logger.error(f"Error fetching leaderboard: {e}")
             return []
 
-    async def _create_tournament(self, config: TournamentConfig):
+    async def _create_tournament(self, config: TournamentConfig) -> bool:
         """Create a tournament via the backend API"""
-        logger.info(f"🎮 Creating Tournament:")
+        logger.info(f"Creating Tournament:")
         logger.info(f"   Name: {config.name}")
         logger.info(f"   Entry Fee: {int(config.entry_fee_wei) / 1e18:.4f} MON")
         logger.info(f"   Max Players: {config.max_players}")
         logger.info(f"   Tier: {config.tier.value}")
+        logger.info(f"   Registration: {config.registration_deadline_minutes} min")
         logger.info(f"   Reason: {config.reason}")
-
-        # Note: In production, this would deploy a real contract
-        # For now, we'll create it in the backend database
-        # The frontend/admin would then deploy the actual contract
 
         try:
             # Generate a placeholder contract address
             # In production, this would come from actual contract deployment
-            import hashlib
-            import time
             placeholder = hashlib.sha256(f"{config.name}{time.time()}".encode()).hexdigest()
             contract_address = f"0x{placeholder[:40]}"
+
+            # Calculate timer timestamps
+            now = datetime.now(timezone.utc)
+            registration_deadline = (
+                now + timedelta(minutes=config.registration_deadline_minutes)
+            ).isoformat()
+            tournament_end_estimate = (
+                now + timedelta(minutes=config.tournament_duration_minutes)
+            ).isoformat()
 
             response = await self.http_client.post(
                 f"{BACKEND_API_URL}/api/admin/arena/create",
@@ -454,18 +514,95 @@ class AutonomousAgent:
                     "entry_fee": config.entry_fee_wei,
                     "max_players": config.max_players,
                     "protocol_fee_bps": config.protocol_fee_bps,
-                    "contract_address": contract_address
+                    "contract_address": contract_address,
                 }
             )
 
             if response.status_code == 200:
                 arena = response.json()
-                logger.info(f"✅ Tournament created: {arena.get('address', 'unknown')}")
+                arena_address = arena.get('address', contract_address)
+                logger.info(f"Tournament created: {arena_address}")
+
+                # Update the arena with timer fields and agent metadata
+                await self._update_arena_timers(
+                    arena_address,
+                    registration_deadline,
+                    tournament_end_estimate,
+                    config.reason,
+                )
+
+                # Notify backend that agent created a tournament
+                await self._notify_tournament_created()
+
+                return True
             else:
-                logger.error(f"❌ Failed to create tournament: {response.status_code} - {response.text}")
+                logger.error(f"Failed to create tournament: {response.status_code} - {response.text}")
+                return False
 
         except Exception as e:
-            logger.error(f"❌ Error creating tournament: {e}")
+            logger.error(f"Error creating tournament: {e}")
+            return False
+
+    async def _update_arena_timers(
+        self,
+        arena_address: str,
+        registration_deadline: str,
+        tournament_end_estimate: str,
+        creation_reason: str,
+    ):
+        """Update arena with timer fields via direct DB update endpoint"""
+        try:
+            # Use the indexer endpoint to update arena fields
+            response = await self.http_client.post(
+                f"{BACKEND_API_URL}/api/indexer/event/arena-created",
+                json={
+                    "address": arena_address,
+                    "registration_deadline": registration_deadline,
+                    "tournament_end_estimate": tournament_end_estimate,
+                    "created_by": "agent",
+                    "creation_reason": creation_reason,
+                }
+            )
+            if response.status_code != 200:
+                logger.warning(f"Failed to update arena timers: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Error updating arena timers: {e}")
+
+    async def _update_schedule(self, next_tournament_at: str, analysis: MarketAnalysis):
+        """Update agent schedule in backend"""
+        try:
+            response = await self.http_client.post(
+                f"{BACKEND_API_URL}/api/agent/update-schedule",
+                headers={"X-Admin-Key": ADMIN_API_KEY},
+                params={
+                    "next_tournament_at": next_tournament_at,
+                    "status": "active",
+                },
+                json={
+                    "hour_of_day": analysis.hour_of_day,
+                    "day_of_week": analysis.day_of_week,
+                    "is_peak_hours": analysis.is_peak_hours,
+                    "is_weekend": analysis.is_weekend,
+                    "active_tournaments": analysis.active_tournaments,
+                    "avg_fill_rate": analysis.avg_fill_rate,
+                    "popular_tier": analysis.popular_tier.value,
+                    "confidence": analysis.confidence,
+                }
+            )
+            if response.status_code != 200:
+                logger.warning(f"Failed to update schedule: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Error updating schedule: {e}")
+
+    async def _notify_tournament_created(self):
+        """Notify backend that agent created a tournament"""
+        try:
+            await self.http_client.post(
+                f"{BACKEND_API_URL}/api/agent/tournament-created",
+                headers={"X-Admin-Key": ADMIN_API_KEY},
+            )
+        except Exception as e:
+            logger.warning(f"Error notifying tournament created: {e}")
 
     async def _check_finalizations(self, arenas: List[Dict]):
         """Check for tournaments that are ready to finalize"""
@@ -478,14 +615,14 @@ class AutonomousAgent:
                 continue
 
             address = arena.get('address')
-            logger.info(f"🏁 Arena {address[:10]}... is ready for finalization")
+            logger.info(f"Arena {address[:10]}... is ready for finalization")
 
             # In production, this would:
             # 1. Run a bracket simulation or get results from a game
             # 2. Determine winners and amounts
             # 3. Request signature and finalize
 
-            # For demo, we'll select random winners
+            # For demo, we select random winners
             # First place gets 70%, second gets 30%
             total_pool = int(arena.get('entry_fee', '0')) * len(players)
             protocol_fee = total_pool * arena.get('protocol_fee_bps', 250) // 10000

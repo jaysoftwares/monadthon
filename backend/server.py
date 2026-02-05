@@ -103,6 +103,11 @@ class Arena(BaseModel):
     winners: List[str] = []
     payouts: List[str] = []
     tx_hash: Optional[str] = None
+    # Timer fields for autonomous agent
+    registration_deadline: Optional[str] = None  # ISO timestamp
+    tournament_end_estimate: Optional[str] = None  # ISO timestamp
+    created_by: str = "admin"  # "admin" or "agent"
+    creation_reason: Optional[str] = None  # Agent's reasoning for creation
 
 class JoinArena(BaseModel):
     arena_address: str
@@ -320,6 +325,175 @@ async def get_arena_payouts(address: str):
     """Get all payouts for an arena"""
     payouts = await db.payouts.find({"arena_address": address}, {"_id": 0}).to_list(100)
     return {"arena_address": address, "payouts": payouts}
+
+# ===========================================
+# AGENT STATUS & SCHEDULE ENDPOINTS
+# ===========================================
+
+@api_router.get("/agent/status")
+async def get_agent_status():
+    """Get autonomous agent status and schedule"""
+    schedule = await db.agent_schedule.find_one({"_id": "current"}, {"_id": 0})
+
+    if not schedule:
+        return {
+            "agent_status": "inactive",
+            "message": "Agent has not reported status yet. Start autonomous_agent.py.",
+            "next_tournament_at": None,
+            "next_tournament_countdown_seconds": 0,
+            "last_cycle_at": None,
+            "tournaments_created_today": 0,
+        }
+
+    # Calculate countdown
+    next_at = schedule.get("next_tournament_at")
+    countdown = 0
+    if next_at:
+        try:
+            next_dt = datetime.fromisoformat(next_at.replace("Z", "+00:00"))
+            diff = (next_dt - datetime.now(timezone.utc)).total_seconds()
+            countdown = max(0, int(diff))
+        except (ValueError, TypeError):
+            countdown = 0
+
+    return {
+        "agent_status": schedule.get("status", "active"),
+        "next_tournament_at": next_at,
+        "next_tournament_countdown_seconds": countdown,
+        "last_cycle_at": schedule.get("last_cycle_at"),
+        "tournaments_created_today": schedule.get("tournaments_created_today", 0),
+        "last_analysis": schedule.get("last_analysis"),
+    }
+
+@api_router.get("/agent/schedule")
+async def get_agent_schedule():
+    """Get full agent schedule with active tournaments and timers"""
+    schedule = await db.agent_schedule.find_one({"_id": "current"}, {"_id": 0})
+
+    # Get active (non-finalized) tournaments
+    active_arenas = await db.arenas.find(
+        {"is_finalized": False},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(20)
+
+    # Get recently completed tournaments
+    recent_completed = await db.arenas.find(
+        {"is_finalized": True},
+        {"_id": 0}
+    ).sort("finalized_at", -1).to_list(5)
+
+    now = datetime.now(timezone.utc)
+
+    # Build active tournament list with countdowns
+    active_list = []
+    for arena in active_arenas:
+        item = {
+            "address": arena.get("address"),
+            "name": arena.get("name"),
+            "status": "closed" if arena.get("is_closed") else "registration_open",
+            "players_joined": len(arena.get("players", [])),
+            "max_players": arena.get("max_players", 8),
+            "entry_fee": arena.get("entry_fee"),
+            "created_by": arena.get("created_by", "admin"),
+        }
+
+        # Registration deadline countdown
+        reg_deadline = arena.get("registration_deadline")
+        if reg_deadline and not arena.get("is_closed"):
+            try:
+                dl_dt = datetime.fromisoformat(reg_deadline.replace("Z", "+00:00"))
+                diff = (dl_dt - now).total_seconds()
+                item["registration_deadline"] = reg_deadline
+                item["registration_countdown_seconds"] = max(0, int(diff))
+            except (ValueError, TypeError):
+                pass
+
+        # Tournament end estimate countdown
+        end_est = arena.get("tournament_end_estimate")
+        if end_est and arena.get("is_closed") and not arena.get("is_finalized"):
+            try:
+                end_dt = datetime.fromisoformat(end_est.replace("Z", "+00:00"))
+                diff = (end_dt - now).total_seconds()
+                item["tournament_end_estimate"] = end_est
+                item["tournament_end_countdown_seconds"] = max(0, int(diff))
+            except (ValueError, TypeError):
+                pass
+
+        active_list.append(item)
+
+    # Next tournament countdown
+    next_at = schedule.get("next_tournament_at") if schedule else None
+    next_countdown = 0
+    if next_at:
+        try:
+            next_dt = datetime.fromisoformat(next_at.replace("Z", "+00:00"))
+            diff = (next_dt - now).total_seconds()
+            next_countdown = max(0, int(diff))
+        except (ValueError, TypeError):
+            pass
+
+    return {
+        "agent_status": schedule.get("status", "inactive") if schedule else "inactive",
+        "next_tournament_at": next_at,
+        "next_tournament_countdown_seconds": next_countdown,
+        "last_cycle_at": schedule.get("last_cycle_at") if schedule else None,
+        "active_tournaments": active_list,
+        "recent_completed": [
+            {
+                "address": a.get("address"),
+                "name": a.get("name"),
+                "finalized_at": a.get("finalized_at"),
+                "winners": a.get("winners", []),
+            }
+            for a in recent_completed
+        ],
+    }
+
+@api_router.post("/agent/update-schedule")
+async def update_agent_schedule(
+    next_tournament_at: Optional[str] = None,
+    status: str = "active",
+    last_analysis: Optional[dict] = None,
+    _: bool = Depends(verify_admin_key)
+):
+    """Update agent schedule (called by autonomous_agent.py)"""
+    update_data = {
+        "status": status,
+        "last_cycle_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if next_tournament_at:
+        update_data["next_tournament_at"] = next_tournament_at
+
+    if last_analysis:
+        update_data["last_analysis"] = last_analysis
+
+    # Increment daily counter
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    current = await db.agent_schedule.find_one({"_id": "current"})
+    if current and current.get("date") == today:
+        update_data["tournaments_created_today"] = current.get("tournaments_created_today", 0)
+    else:
+        update_data["tournaments_created_today"] = 0
+        update_data["date"] = today
+
+    await db.agent_schedule.update_one(
+        {"_id": "current"},
+        {"$set": update_data},
+        upsert=True
+    )
+
+    return {"success": True, "message": "Agent schedule updated"}
+
+@api_router.post("/agent/tournament-created")
+async def agent_tournament_created(_: bool = Depends(verify_admin_key)):
+    """Increment the agent's daily tournament creation counter"""
+    await db.agent_schedule.update_one(
+        {"_id": "current"},
+        {"$inc": {"tournaments_created_today": 1}},
+        upsert=True
+    )
+    return {"success": True}
 
 # ===========================================
 # JOIN ENDPOINT

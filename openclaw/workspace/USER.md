@@ -1,22 +1,24 @@
 # CLAW ARENA - User/Operator Guide
 
 ## Overview
-This document provides guidance for operators and administrators of CLAW ARENA.
+CLAW ARENA is an autonomous tournament platform on Monad where an AI agent (Claw Arena Host) is the primary tournament director. The agent creates tournaments, reads the room to optimize parameters, and manages the full lifecycle. Admin retains the ability to create and manage tournaments but the agent leads.
 
 ## Roles
 
-### Platform Admin
+### Claw Arena Host (AI Agent) - PRIMARY DIRECTOR
+- **Creates tournaments autonomously** based on market analysis
+- Sets optimal entry fees, player counts, and timing
+- Manages tournament schedule with visible countdown timers
+- Signs finalize transactions via EIP-712
+- Monitors player activity and adjusts strategy
+- Maintains 2-5 active tournaments at all times
+
+### Platform Admin - SUPPORTING ROLE
 - Deploy and configure smart contracts
 - Set operator signer address
 - Manage protocol fee treasury
-- Create and manage arenas
-
-### Tournament Operator
-- Create new arenas
-- Monitor registrations
-- Close registration when ready
-- Request finalize signatures
-- Submit finalize transactions
+- Can create and manage arenas (secondary to agent)
+- Override agent decisions if needed
 
 ### Player
 - Connect wallet
@@ -27,18 +29,45 @@ This document provides guidance for operators and administrators of CLAW ARENA.
 
 ---
 
+## How the Agent Works
+
+### Tournament Creation Flow
+1. Agent runs on a 30-minute cycle (configurable)
+2. Each cycle, it analyzes:
+   - How many tournaments are currently active
+   - What fill rates look like (are players joining?)
+   - What time of day and day of week it is
+   - Which tiers (MICRO/SMALL/MEDIUM/LARGE/WHALE) are popular
+3. Based on analysis, it creates tournaments with optimized parameters
+4. A countdown timer appears on the frontend: "Next tournament in X:XX"
+
+### Tier System
+| Tier | Entry Fee (MON) | Max Players | When |
+|------|----------------|-------------|------|
+| MICRO | 0.001 - 0.01 | 4-16 | Always available |
+| SMALL | 0.01 - 0.1 | 4-16 | Default tier |
+| MEDIUM | 0.1 - 1 | 4-8 | Peak hours |
+| LARGE | 1 - 10 | 4-8 | High engagement |
+| WHALE | 10+ | 4 | Weekend peaks |
+
+### Timer System
+Players always see:
+- **"Next tournament starts in..."** - Countdown to next agent-created tournament
+- **"Registration closes in..."** - Time left to join an open tournament
+- **"Tournament ends in..."** - Time until competition concludes
+
+---
+
 ## Admin Workflows
 
 ### 1. Initial Setup
 
 #### Deploy Contracts
 ```bash
-# Set environment variables
 export MONAD_RPC_URL="https://testnet-rpc.monad.xyz"
 export DEPLOYER_PRIVATE_KEY="0x..."
-export OPERATOR_ADDRESS="0x..." # OpenClaw operator
+export OPERATOR_ADDRESS="0x..."
 
-# Deploy factory
 forge script script/Deploy.s.sol --rpc-url $MONAD_RPC_URL --broadcast
 ```
 
@@ -49,49 +78,43 @@ MONGO_URL="mongodb://localhost:27017"
 DB_NAME="claw_arena"
 ADMIN_API_KEY="your-secure-key"
 OPERATOR_ADDRESS="0x..."
-CHAIN_ID="10143"
+DEFAULT_NETWORK="testnet"
 ```
 
-#### Configure Frontend
-```env
-# frontend/.env
-REACT_APP_BACKEND_URL="https://api.clawarena.xyz"
-REACT_APP_CHAIN_ID="10143"
-REACT_APP_MONAD_RPC_URL="https://testnet-rpc.monad.xyz"
+#### Start Services
+```bash
+# Terminal 1: Backend API
+cd backend && uvicorn server:app --host 0.0.0.0 --port 8000
+
+# Terminal 2: Agent Signer
+cd backend && python agent_signer.py
+
+# Terminal 3: Autonomous Agent
+cd backend && python autonomous_agent.py
+
+# Terminal 4: Frontend
+cd frontend && npm start
 ```
 
-### 2. Create Arena
+### 2. Manual Arena Creation (Admin Override)
 
+If you need to create an arena manually (overriding the agent):
 1. Navigate to Admin Panel (`/admin`)
-2. Fill in arena details:
-   - Name (e.g., "Weekend Showdown #1")
-   - Entry Fee (in MON)
-   - Max Players (4, 8, 16, 32)
-   - Protocol Fee (1%, 2.5%, 5%)
+2. Fill in arena details
 3. Click "Create Arena"
-4. Arena is now open for registration
+4. Arena appears in lobby alongside agent-created tournaments
 
-### 3. Close Registration
+### 3. Monitor Agent Activity
 
-When ready to start the tournament:
-1. Go to Admin Panel
-2. Find arena in "Close Registration" section
-3. Click "Close" button
-4. Registration is now closed, no more players can join
+Check agent status:
+```bash
+curl http://localhost:8000/api/agent/status
+```
 
-### 4. Finalize Tournament
-
-After competition completes:
-
-1. Select arena in "Finalize Tournament" section
-2. Enter winners and their payout amounts
-   - Winners must be from the player list
-   - Amounts must not exceed prize pool minus fees
-3. Click "Request Finalize Signature"
-4. Wait for OpenClaw agent to return signature
-5. Click "Finalize & Distribute Prizes"
-6. Transaction will be submitted from your wallet
-7. Winners receive payouts automatically
+View upcoming schedule:
+```bash
+curl http://localhost:8000/api/agent/schedule
+```
 
 ---
 
@@ -100,64 +123,49 @@ After competition completes:
 ### 1. Join Tournament
 
 1. Connect wallet (MetaMask or compatible)
-2. Browse open tournaments on Lobby page
-3. Click "Join Arena" on desired tournament
-4. Confirm transaction to pay entry fee
-5. Wait for transaction confirmation
-6. You're now registered!
+2. Check countdown timers on Lobby page for upcoming tournaments
+3. Browse open tournaments
+4. Click "Join Arena" on desired tournament
+5. Confirm transaction to pay entry fee
+6. Wait for tournament to start (watch the timer!)
 
 ### 2. Compete
 
 - Tournament brackets run off-chain
 - Follow announcements for match schedules
-- Results are recorded by tournament admin
+- Results are recorded automatically
 
 ### 3. Receive Payout
 
 After tournament finalizes:
 - Payouts are automatically sent to winner addresses
 - Check your wallet for incoming MON
-- View payout in arena results page
+- View results on the arena page
 - Claim Proof of W NFT (if winner)
 
 ---
 
 ## Troubleshooting
 
+### Issue: Agent Not Creating Tournaments
+**Check**: Is `autonomous_agent.py` running?
+```bash
+curl http://localhost:8000/api/agent/status
+```
+**Check**: Is ADMIN_API_KEY set in `.env`?
+
+### Issue: No Countdown Timer Showing
+**Check**: Backend must have agent schedule data. Restart autonomous agent.
+
 ### Issue: Transaction Failing
-
-**Possible Causes**:
-- Insufficient MON balance
-- Wrong network (ensure Monad Testnet)
-- Arena is full or closed
-
-**Solutions**:
-1. Check wallet balance
-2. Verify network in wallet
-3. Refresh arena page
+- Check wallet balance (need MON for gas + entry fee)
+- Verify you're on the correct network (Monad Testnet/Mainnet)
+- Arena might be full or closed
 
 ### Issue: Finalize Signature Not Received
-
-**Possible Causes**:
-- OpenClaw Gateway unavailable
-- Invalid winner addresses
-- Payout amounts exceed escrow
-
-**Solutions**:
-1. Verify all winners are valid players
-2. Check payout sum <= prize pool - fees
-3. Contact support if persists
-
-### Issue: Arena Not Showing
-
-**Possible Causes**:
-- Indexer delay
-- Backend service down
-
-**Solutions**:
-1. Wait 30 seconds and refresh
-2. Check backend health endpoint
-3. Contact support
+- Verify agent_signer.py is running on port 8002
+- Check that OPERATOR_PRIVATE_KEY is set
+- Ensure all winners are valid players
 
 ---
 
@@ -166,35 +174,33 @@ After tournament finalizes:
 ### For Admins
 - Use hardware wallet for admin operations
 - Keep ADMIN_API_KEY secure
-- Review winner/payout data before finalizing
-- Monitor for suspicious activity
+- Monitor agent logs for anomalies
+- Review agent's tournament creation patterns
 
 ### For Players
 - Verify arena contract address
 - Only join through official frontend
 - Keep wallet secure
-- Don't share private keys
-
----
-
-## Support
-
-- Discord: [CLAW ARENA Discord]
-- Twitter: @ClawArena
-- Email: support@clawarena.xyz
+- Check countdown timers to plan your participation
 
 ---
 
 ## FAQ
 
-**Q: How are brackets determined?**
-A: Brackets can be randomized or seeded by the tournament operator.
+**Q: Who creates the tournaments?**
+A: The Claw Arena Host AI agent creates them autonomously. Admin can also create manually.
 
-**Q: What happens if finalize fails?**
-A: Funds remain in escrow. Admin can retry with corrected data.
+**Q: How does the agent decide tournament parameters?**
+A: It analyzes fill rates, time of day, day of week, and tier popularity to pick optimal entry fees and player counts.
 
-**Q: Can I withdraw after joining?**
-A: No, entry fees are locked once joined.
+**Q: What are the countdown timers?**
+A: Timers show: when the next tournament starts, when registration closes for open tournaments, and when active tournaments end.
+
+**Q: Can I request a specific tournament type?**
+A: Not directly, but the agent reads the room. If WHALE tournaments fill up quickly, it will create more of them.
 
 **Q: How is the operator key secured?**
 A: The operator private key is managed by OpenClaw runtime and never exposed.
+
+**Q: What happens between tournaments?**
+A: A countdown timer shows when the next one starts. The agent plans new tournaments based on how the previous ones performed.

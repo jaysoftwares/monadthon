@@ -1,7 +1,127 @@
 # CLAW ARENA - Tools Reference
 
 ## Overview
-Tools available to the Claw Arena Host agent for tournament operations.
+Tools available to the Claw Arena Host agent for autonomous tournament creation, management, and finalization.
+
+---
+
+## Tool: `arena.create_tournament`
+
+### Purpose
+Create a new tournament with specified parameters. This is the agent's primary tool for autonomous tournament creation.
+
+### Input Schema
+```json
+{
+  "name": "Rising Stars #42",
+  "entry_fee_wei": "50000000000000000",
+  "max_players": 8,
+  "protocol_fee_bps": 250,
+  "registration_deadline_minutes": 60,
+  "reason": "peak hours, high engagement, 80% confidence"
+}
+```
+
+### Output Schema
+```json
+{
+  "success": true,
+  "arena_address": "0x...",
+  "name": "Rising Stars #42",
+  "entry_fee_wei": "50000000000000000",
+  "max_players": 8,
+  "registration_deadline": "2025-01-15T20:00:00Z",
+  "tournament_end_estimate": "2025-01-15T22:00:00Z",
+  "next_tournament_at": "2025-01-15T22:15:00Z"
+}
+```
+
+### Behavior
+- Deploys contract via ArenaFactory (or registers via backend API)
+- Sets registration deadline timer
+- Updates frontend countdown timers
+- Logs creation reason for transparency
+
+---
+
+## Tool: `arena.analyze_market`
+
+### Purpose
+Analyze current market conditions to inform tournament creation decisions.
+
+### Input Schema
+```json
+{
+  "include_historical": true,
+  "lookback_hours": 24
+}
+```
+
+### Output Schema
+```json
+{
+  "hour_of_day": 18,
+  "day_of_week": 5,
+  "is_peak_hours": true,
+  "is_weekend": true,
+  "active_tournaments": 3,
+  "avg_fill_rate": 0.75,
+  "popular_tier": "SMALL",
+  "tier_breakdown": {
+    "MICRO": {"fill_rate": 0.9, "count": 2},
+    "SMALL": {"fill_rate": 0.75, "count": 3},
+    "MEDIUM": {"fill_rate": 0.5, "count": 1},
+    "LARGE": {"fill_rate": 0.3, "count": 0},
+    "WHALE": {"fill_rate": 0.0, "count": 0}
+  },
+  "recommended_tier": "SMALL",
+  "recommended_entry_fee": "50000000000000000",
+  "recommended_players": 8,
+  "confidence": 0.8,
+  "reasoning": "Peak weekend hours with high fill rates in SMALL tier"
+}
+```
+
+---
+
+## Tool: `arena.get_schedule`
+
+### Purpose
+Get the agent's current tournament schedule and countdown timers.
+
+### Input Schema
+```json
+{}
+```
+
+### Output Schema
+```json
+{
+  "next_tournament_at": "2025-01-15T18:30:00Z",
+  "next_tournament_countdown_seconds": 847,
+  "active_tournaments": [
+    {
+      "address": "0x...",
+      "name": "Rising Stars #42",
+      "status": "registration_open",
+      "registration_deadline": "2025-01-15T19:00:00Z",
+      "registration_countdown_seconds": 2647,
+      "players_joined": 5,
+      "max_players": 8
+    }
+  ],
+  "recent_completed": [
+    {
+      "address": "0x...",
+      "name": "Micro Mayhem #41",
+      "finalized_at": "2025-01-15T17:45:00Z",
+      "winners": ["0x..."]
+    }
+  ],
+  "agent_status": "active",
+  "last_cycle_at": "2025-01-15T18:00:00Z"
+}
+```
 
 ---
 
@@ -176,7 +296,9 @@ Get current arena state from contract.
   "players": ["0x...", "0x..."],
   "is_closed": false,
   "is_finalized": false,
-  "balance": "200000000000000000"
+  "balance": "200000000000000000",
+  "registration_deadline": "2025-01-15T20:00:00Z",
+  "tournament_end_estimate": "2025-01-15T22:00:00Z"
 }
 ```
 
@@ -194,12 +316,14 @@ Authorization: Bearer <OPENCLAW_BEARER_TOKEN>
 X-Session-Key: <OPENCLAW_SESSION_KEY>
 
 {
-  "tool": "arena.sign_finalize_eip712",
+  "tool": "arena.create_tournament",
   "params": {
-    "arena_address": "0x...",
-    "winners": ["0x..."],
-    "amounts": ["1000000000000000000"],
-    "nonce": 1
+    "name": "Rising Stars #42",
+    "entry_fee_wei": "50000000000000000",
+    "max_players": 8,
+    "protocol_fee_bps": 250,
+    "registration_deadline_minutes": 60,
+    "reason": "peak hours, high engagement"
   }
 }
 ```

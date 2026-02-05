@@ -5,9 +5,10 @@ import { useWallet } from '../context/WalletContext';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Skeleton } from '../components/ui/skeleton';
-import { 
-  ArrowLeft, Users, Coins, Trophy, Clock, ExternalLink, 
-  CheckCircle, XCircle, Loader2, Copy, Check 
+import CountdownTimer from '../components/CountdownTimer';
+import {
+  ArrowLeft, Users, Coins, Trophy, Clock, ExternalLink,
+  CheckCircle, XCircle, Loader2, Copy, Check, Bot, Timer
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -202,8 +203,34 @@ const ArenaPage = () => {
               Created
             </div>
             <p className="font-heading text-lg font-bold text-gray-900">{new Date(arena.created_at).toLocaleDateString()}</p>
+            {arena.created_by === 'agent' && (
+              <div className="flex items-center gap-1 mt-1 text-xs text-[#836EF9]">
+                <Bot className="w-3 h-3" />
+                <span>By Agent</span>
+              </div>
+            )}
           </div>
         </div>
+
+        {/* Countdown Timer Banner */}
+        {!arena.is_finalized && arena.registration_deadline && !arena.is_closed && (
+          <div className="mb-8">
+            <CountdownTimer
+              targetTime={arena.registration_deadline}
+              label="Registration Closes In"
+              variant="banner"
+            />
+          </div>
+        )}
+        {arena.is_closed && !arena.is_finalized && arena.tournament_end_estimate && (
+          <div className="mb-8">
+            <CountdownTimer
+              targetTime={arena.tournament_end_estimate}
+              label="Tournament Ends In"
+              variant="banner"
+            />
+          </div>
+        )}
 
         {/* Join Button */}
         {canJoin && (
