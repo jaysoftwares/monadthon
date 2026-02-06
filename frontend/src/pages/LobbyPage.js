@@ -5,7 +5,7 @@ import ArenaCard from '../components/ArenaCard';
 import CountdownTimer from '../components/CountdownTimer';
 import { Button } from '../components/ui/button';
 import { Skeleton } from '../components/ui/skeleton';
-import { Trophy, Users, Coins, Zap, ArrowRight, Plus, Bot, Activity } from 'lucide-react';
+import { Trophy, Users, Coins, Zap, ArrowRight, Bot, Activity } from 'lucide-react';
 
 const LobbyPage = () => {
   const [arenas, setArenas] = useState([]);
@@ -94,12 +94,19 @@ const LobbyPage = () => {
               </p>
               
               <div className="flex flex-wrap gap-4">
-                <Link to={openArenas[0] ? `/arena/${openArenas[0].address}` : '/admin'}>
-                  <Button className="btn-primary text-base px-6 py-3" data-testid="hero-join-btn">
-                    {openArenas.length > 0 ? 'Join Tournament' : 'Create Tournament'}
-                    <ArrowRight className="w-5 h-5 ml-2" />
+                {openArenas.length > 0 ? (
+                  <Link to={`/arena/${openArenas[0].address}`}>
+                    <Button className="btn-primary text-base px-6 py-3" data-testid="hero-join-btn">
+                      Join Tournament
+                      <ArrowRight className="w-5 h-5 ml-2" />
+                    </Button>
+                  </Link>
+                ) : (
+                  <Button className="btn-primary text-base px-6 py-3 opacity-75" disabled data-testid="hero-join-btn">
+                    <Bot className="w-5 h-5 mr-2" />
+                    Waiting for Next Tournament
                   </Button>
-                </Link>
+                )}
                 <Link to="/leaderboard">
                   <Button variant="outline" className="text-base px-6 py-3 border-gray-200 hover:border-purple-200 hover:bg-purple-50" data-testid="hero-leaderboard-btn">
                     <Trophy className="w-5 h-5 mr-2 text-[#836EF9]" />
@@ -202,12 +209,6 @@ const LobbyPage = () => {
               <h2 className="font-heading text-2xl font-bold text-gray-900">Open Tournaments</h2>
               <p className="text-gray-500 mt-1">Join now and compete for prizes</p>
             </div>
-            <Link to="/admin">
-              <Button variant="outline" className="border-purple-200 text-[#836EF9] hover:bg-purple-50" data-testid="create-arena-btn">
-                <Plus className="w-4 h-4 mr-2" />
-                Create Arena
-              </Button>
-            </Link>
           </div>
 
           {loading ? (
@@ -233,16 +234,24 @@ const LobbyPage = () => {
           ) : (
             <div className="empty-state">
               <div className="empty-state-icon">
-                <Trophy className="w-8 h-8 text-[#836EF9]" />
+                <Bot className="w-8 h-8 text-[#836EF9]" />
               </div>
               <h3 className="font-heading text-xl font-semibold text-gray-900 mb-2">No Open Tournaments</h3>
-              <p className="text-gray-500 mb-6">Be the first to create a tournament!</p>
-              <Link to="/admin">
-                <Button className="btn-primary" data-testid="empty-create-btn">
-                  <Plus className="w-4 h-4 mr-2" />
-                  Create Tournament
-                </Button>
-              </Link>
+              <p className="text-gray-500 mb-6">
+                {agentStatus?.agent_status === 'active'
+                  ? 'The Claw Arena Host is preparing the next tournament...'
+                  : 'Waiting for the autonomous agent to create tournaments'}
+              </p>
+              {agentStatus?.next_tournament_at && (
+                <div className="flex items-center justify-center gap-2 text-[#836EF9]">
+                  <span className="text-sm">Next tournament in</span>
+                  <CountdownTimer
+                    targetTime={agentStatus.next_tournament_at}
+                    variant="inline"
+                    onComplete={fetchData}
+                  />
+                </div>
+              )}
             </div>
           )}
         </div>
