@@ -12,6 +12,13 @@ The agent runs on a configurable schedule, makes intelligent decisions
 about tournament parameters, and maintains visible countdown timers
 for the frontend.
 
+GAME MODES:
+Each tournament features one of 4 rotating game types:
+1. Claw Machine Madness - Skill-based claw grabbing
+2. Prediction Arena - Predict outcomes
+3. Speed Challenge - Reaction time & puzzles
+4. Blackjack Showdown - Card game tournament
+
 Usage:
     python autonomous_agent.py
 
@@ -35,6 +42,8 @@ import hashlib
 import time
 import httpx
 from dotenv import load_dotenv
+
+from game_engine import GameType, GameEngine, GAME_RULES, get_game_rules_json
 
 load_dotenv()
 
@@ -71,9 +80,11 @@ class TournamentConfig:
     max_players: int
     protocol_fee_bps: int
     tier: TournamentTier
+    game_type: GameType  # The game mode for this tournament
     reason: str  # Why the agent chose these parameters
     registration_deadline_minutes: int = 60  # How long registration stays open
     tournament_duration_minutes: int = 120  # Estimated total tournament time
+    learning_phase_seconds: int = 60  # Time for players to learn the game rules
 
 
 @dataclass
@@ -93,6 +104,9 @@ class MarketAnalysis:
 
 class TournamentAnalytics:
     """Analyzes tournament data to make intelligent decisions"""
+
+    # Available game types with their player constraints
+    GAME_TYPES = list(GameType)
 
     # Entry fees in wei for each tier
     TIER_FEES = {
@@ -286,9 +300,24 @@ class TournamentAnalytics:
         """Generate tournament configuration based on market analysis"""
         tier = self._fee_to_tier(int(analysis.recommended_entry_fee))
 
-        # Generate tournament name
+        # Select a random game type that fits the player count
+        game_type = self._select_game_type(analysis.recommended_players)
+        game_rules = GAME_RULES[game_type]
+
+        # Adjust player count to fit game constraints
+        max_players = min(analysis.recommended_players, game_rules.max_players)
+        max_players = max(max_players, game_rules.min_players)
+
+        # Generate tournament name with game type prefix
+        game_prefixes = {
+            GameType.CLAW: "Claw",
+            GameType.PREDICTION: "Prediction",
+            GameType.SPEED: "Speed",
+            GameType.BLACKJACK: "Blackjack",
+        }
         name_template = random.choice(self.NAME_TEMPLATES[tier])
-        name = name_template.format(n=self.tournament_counter)
+        base_name = name_template.format(n=self.tournament_counter)
+        name = f"{game_prefixes[game_type]} {base_name}"
         self.tournament_counter += 1
 
         # Determine protocol fee (higher for larger tournaments)
@@ -303,11 +332,14 @@ class TournamentAnalytics:
         reg_options = self.TIER_REGISTRATION[tier]
         reg_deadline = random.randint(reg_options[0], reg_options[1])
 
-        # Tournament duration estimate (registration + competition)
-        tournament_duration = reg_deadline + random.randint(30, 90)
+        # Tournament duration = registration + learning phase + game duration
+        learning_phase = 60  # 1 minute to learn the rules
+        game_duration = game_rules.duration_seconds // 60  # Convert to minutes
+        tournament_duration = reg_deadline + (learning_phase // 60) + game_duration
 
         # Build reason string
         reasons = []
+        reasons.append(f"game: {game_rules.name}")
         if analysis.is_peak_hours:
             reasons.append("peak hours")
         if analysis.is_weekend:
@@ -321,13 +353,26 @@ class TournamentAnalytics:
         return TournamentConfig(
             name=name,
             entry_fee_wei=analysis.recommended_entry_fee,
-            max_players=analysis.recommended_players,
+            max_players=max_players,
             protocol_fee_bps=protocol_fee_bps,
             tier=tier,
+            game_type=game_type,
             reason=", ".join(reasons),
             registration_deadline_minutes=reg_deadline,
             tournament_duration_minutes=tournament_duration,
+            learning_phase_seconds=learning_phase,
         )
+
+    def _select_game_type(self, player_count: int) -> GameType:
+        """Select a random game type suitable for the player count"""
+        suitable_games = [
+            gt for gt in GameType
+            if GAME_RULES[gt].min_players <= player_count <= GAME_RULES[gt].max_players
+        ]
+        if not suitable_games:
+            # Default to prediction which supports most players
+            return GameType.PREDICTION
+        return random.choice(suitable_games)
 
     def calculate_next_tournament_delay(self, analysis: MarketAnalysis) -> int:
         """Calculate delay (in minutes) before creating the next tournament"""
@@ -346,6 +391,7 @@ class AutonomousAgent:
 
     def __init__(self):
         self.analytics = TournamentAnalytics()
+        self.game_engine = GameEngine()
         self.http_client: Optional[httpx.AsyncClient] = None
         self.running = False
 
@@ -482,12 +528,17 @@ class AutonomousAgent:
 
     async def _create_tournament(self, config: TournamentConfig) -> bool:
         """Create a tournament via the backend API"""
+        game_rules = GAME_RULES[config.game_type]
+
         logger.info(f"Creating Tournament:")
         logger.info(f"   Name: {config.name}")
+        logger.info(f"   Game: {game_rules.name}")
         logger.info(f"   Entry Fee: {int(config.entry_fee_wei) / 1e18:.4f} MON")
         logger.info(f"   Max Players: {config.max_players}")
         logger.info(f"   Tier: {config.tier.value}")
         logger.info(f"   Registration: {config.registration_deadline_minutes} min")
+        logger.info(f"   Learning Phase: {config.learning_phase_seconds} sec")
+        logger.info(f"   Game Duration: {game_rules.duration_seconds} sec")
         logger.info(f"   Reason: {config.reason}")
 
         try:
@@ -501,6 +552,18 @@ class AutonomousAgent:
             registration_deadline = (
                 now + timedelta(minutes=config.registration_deadline_minutes)
             ).isoformat()
+
+            # Learning phase starts after registration
+            learning_phase_start = (
+                now + timedelta(minutes=config.registration_deadline_minutes)
+            ).isoformat()
+            learning_phase_end = (
+                now + timedelta(minutes=config.registration_deadline_minutes) +
+                timedelta(seconds=config.learning_phase_seconds)
+            ).isoformat()
+
+            # Game starts after learning phase
+            game_start = learning_phase_end
             tournament_end_estimate = (
                 now + timedelta(minutes=config.tournament_duration_minutes)
             ).isoformat()
@@ -515,6 +578,16 @@ class AutonomousAgent:
                     "max_players": config.max_players,
                     "protocol_fee_bps": config.protocol_fee_bps,
                     "contract_address": contract_address,
+                    "game_type": config.game_type.value,
+                    "game_config": {
+                        "type": config.game_type.value,
+                        "name": game_rules.name,
+                        "description": game_rules.description,
+                        "how_to_play": game_rules.how_to_play,
+                        "tips": game_rules.tips,
+                        "duration_seconds": game_rules.duration_seconds,
+                    },
+                    "learning_phase_seconds": config.learning_phase_seconds,
                 }
             )
 
@@ -529,6 +602,10 @@ class AutonomousAgent:
                     registration_deadline,
                     tournament_end_estimate,
                     config.reason,
+                    config.game_type.value,
+                    learning_phase_start,
+                    learning_phase_end,
+                    game_start,
                 )
 
                 # Notify backend that agent created a tournament
@@ -549,6 +626,10 @@ class AutonomousAgent:
         registration_deadline: str,
         tournament_end_estimate: str,
         creation_reason: str,
+        game_type: str = None,
+        learning_phase_start: str = None,
+        learning_phase_end: str = None,
+        game_start: str = None,
     ):
         """Update arena with timer fields via direct DB update endpoint"""
         try:
@@ -561,6 +642,10 @@ class AutonomousAgent:
                     "tournament_end_estimate": tournament_end_estimate,
                     "created_by": "agent",
                     "creation_reason": creation_reason,
+                    "game_type": game_type,
+                    "learning_phase_start": learning_phase_start,
+                    "learning_phase_end": learning_phase_end,
+                    "game_start": game_start,
                 }
             )
             if response.status_code != 200:
@@ -615,31 +700,78 @@ class AutonomousAgent:
                 continue
 
             address = arena.get('address')
+            game_type_str = arena.get('game_type', 'prediction')
             logger.info(f"Arena {address[:10]}... is ready for finalization")
+            logger.info(f"   Game type: {game_type_str}")
 
-            # In production, this would:
-            # 1. Run a bracket simulation or get results from a game
-            # 2. Determine winners and amounts
-            # 3. Request signature and finalize
+            # Get game results from the game engine
+            game_id = arena.get('game_id')
+            if game_id and game_id in self.game_engine.active_games:
+                # Use actual game results
+                game_state = self.game_engine.finish_game(game_id)
+                if game_state and game_state.winners:
+                    winners = game_state.winners[:2]
+                    logger.info(f"   Game finished! Winners determined by gameplay.")
+                else:
+                    # Fallback if game state is incomplete
+                    winners = random.sample(players, min(2, len(players)))
+                    logger.info(f"   Using fallback winner selection.")
+            else:
+                # No active game session - winners determined by game that was played
+                # Check for stored game results
+                game_results = arena.get('game_results', {})
+                if game_results.get('winners'):
+                    winners = game_results['winners'][:2]
+                    logger.info(f"   Using stored game results.")
+                else:
+                    # Fallback: random selection (shouldn't happen in production)
+                    winners = random.sample(players, min(2, len(players)))
+                    logger.info(f"   No game results found, using fallback.")
 
-            # For demo, we select random winners
-            # First place gets 70%, second gets 30%
+            # Calculate prize distribution
             total_pool = int(arena.get('entry_fee', '0')) * len(players)
             protocol_fee = total_pool * arena.get('protocol_fee_bps', 250) // 10000
             prize_pool = total_pool - protocol_fee
 
-            if len(players) >= 2:
-                winners = random.sample(players, min(2, len(players)))
+            # Prize split: 1st = 70%, 2nd = 30%
+            if len(winners) >= 2:
                 amounts = [
                     str(int(prize_pool * 0.7)),
                     str(int(prize_pool * 0.3))
                 ]
+            else:
+                amounts = [str(prize_pool)]
 
-                logger.info(f"   Winners: {winners[0][:10]}..., {winners[1][:10]}...")
-                logger.info(f"   Prizes: {int(amounts[0])/1e18:.4f} MON, {int(amounts[1])/1e18:.4f} MON")
+            logger.info(f"   Winners: {[w[:10] + '...' for w in winners]}")
+            logger.info(f"   Prizes: {[f'{int(a)/1e18:.4f} MON' for a in amounts]}")
 
-                # Note: Actual finalization would be triggered here
-                # await self._finalize_tournament(address, winners, amounts)
+            # Request finalization from backend
+            await self._request_finalization(address, winners, amounts)
+
+    async def _request_finalization(
+        self,
+        arena_address: str,
+        winners: List[str],
+        amounts: List[str],
+    ):
+        """Request the backend to finalize a tournament"""
+        try:
+            response = await self.http_client.post(
+                f"{BACKEND_API_URL}/api/admin/arena/finalize",
+                headers={"X-Admin-Key": ADMIN_API_KEY},
+                json={
+                    "arena_address": arena_address,
+                    "winners": winners,
+                    "amounts": amounts,
+                    "network": DEFAULT_NETWORK,
+                }
+            )
+            if response.status_code == 200:
+                logger.info(f"   Finalization requested successfully")
+            else:
+                logger.warning(f"   Finalization request failed: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"   Error requesting finalization: {e}")
 
 
 async def main():

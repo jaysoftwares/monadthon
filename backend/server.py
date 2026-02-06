@@ -6,11 +6,16 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict, Any
 import uuid
 from datetime import datetime, timezone
 import hashlib
 import httpx
+
+from game_engine import (
+    GameType, GameEngine, GameState, GAME_RULES,
+    get_game_rules_json, get_all_game_types, game_engine
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -82,6 +87,9 @@ class ArenaCreate(BaseModel):
     max_players: int = 8
     protocol_fee_bps: int = 250  # 2.5%
     contract_address: str  # Real contract address from on-chain deployment
+    game_type: Optional[str] = None  # "claw", "prediction", "speed", "blackjack"
+    game_config: Optional[Dict[str, Any]] = None  # Game rules and config
+    learning_phase_seconds: int = 60  # Duration of learning phase (1 minute default)
 
 class Arena(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -108,6 +116,16 @@ class Arena(BaseModel):
     tournament_end_estimate: Optional[str] = None  # ISO timestamp
     created_by: str = "admin"  # "admin" or "agent"
     creation_reason: Optional[str] = None  # Agent's reasoning for creation
+    # Game fields
+    game_type: Optional[str] = None  # "claw", "prediction", "speed", "blackjack"
+    game_config: Optional[Dict[str, Any]] = None  # Game rules and config
+    game_id: Optional[str] = None  # Active game session ID
+    game_status: Optional[str] = None  # "waiting", "learning", "active", "finished"
+    learning_phase_start: Optional[str] = None  # When 1-min learning phase starts
+    learning_phase_end: Optional[str] = None  # When learning phase ends
+    game_start: Optional[str] = None  # When actual game starts
+    game_results: Optional[Dict[str, Any]] = None  # Final game results
+    learning_phase_seconds: int = 60  # Duration of learning phase
 
 class JoinArena(BaseModel):
     arena_address: str
@@ -157,6 +175,46 @@ class PayoutRecord(BaseModel):
     amount: str
     tx_hash: str
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+# Game-related models
+class GameMove(BaseModel):
+    """A player's move in a game"""
+    arena_address: str
+    player_address: str
+    move_data: Dict[str, Any]  # Game-specific move data
+
+
+class GameMoveResponse(BaseModel):
+    """Response after submitting a move"""
+    success: bool
+    message: str
+    player_score: Optional[int] = None
+    game_state: Optional[Dict[str, Any]] = None
+
+
+class GameRulesResponse(BaseModel):
+    """Game rules for frontend display"""
+    game_type: str
+    name: str
+    description: str
+    how_to_play: List[str]
+    tips: List[str]
+    duration_seconds: int
+    min_players: int
+    max_players: int
+
+
+class GameStateResponse(BaseModel):
+    """Current game state"""
+    game_id: str
+    arena_address: str
+    game_type: str
+    status: str
+    round_number: int
+    current_challenge: Optional[Dict[str, Any]] = None
+    leaderboard: List[Dict[str, Any]] = []
+    time_remaining_seconds: int = 0
 
 # ===========================================
 # DEPENDENCIES
@@ -571,6 +629,21 @@ async def create_arena(
     if existing:
         raise HTTPException(status_code=400, detail="Arena with this address already exists")
 
+    # If no game type specified, randomly select one
+    game_type = arena_data.game_type
+    if not game_type:
+        import random
+        game_type = random.choice(["claw", "prediction", "speed", "blackjack"])
+
+    # Get game config if not provided
+    game_config = arena_data.game_config
+    if not game_config:
+        try:
+            gt = GameType(game_type)
+            game_config = get_game_rules_json(gt)
+        except ValueError:
+            game_config = {}
+
     arena = Arena(
         address=arena_data.contract_address,
         name=arena_data.name,
@@ -578,12 +651,16 @@ async def create_arena(
         max_players=arena_data.max_players,
         protocol_fee_bps=arena_data.protocol_fee_bps,
         treasury=config.treasury,
-        network=network
+        network=network,
+        game_type=game_type,
+        game_config=game_config,
+        game_status="waiting",
+        learning_phase_seconds=arena_data.learning_phase_seconds
     )
 
     await db.arenas.insert_one(arena.model_dump())
 
-    logger.info(f"Created arena {arena.name} at {arena_data.contract_address} on {network}")
+    logger.info(f"Created arena {arena.name} at {arena_data.contract_address} on {network} with game: {game_type}")
 
     return arena
 
@@ -720,6 +797,277 @@ async def record_finalize(
     logger.info(f"Finalized arena {address} with tx {tx_hash}")
 
     return {"success": True, "message": "Arena finalized", "tx_hash": tx_hash}
+
+# ===========================================
+# GAME ENDPOINTS
+# ===========================================
+
+@api_router.get("/games/types", response_model=List[GameRulesResponse])
+async def get_game_types():
+    """Get all available game types with their rules"""
+    return get_all_game_types()
+
+
+@api_router.get("/games/rules/{game_type}", response_model=GameRulesResponse)
+async def get_game_rules(game_type: str):
+    """Get rules for a specific game type"""
+    try:
+        gt = GameType(game_type)
+        return get_game_rules_json(gt)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid game type: {game_type}")
+
+
+@api_router.get("/arenas/{address}/game", response_model=GameStateResponse)
+async def get_arena_game_state(address: str):
+    """Get current game state for an arena"""
+    arena = await db.arenas.find_one({"address": address}, {"_id": 0})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+
+    game_id = arena.get("game_id")
+    if not game_id or game_id not in game_engine.active_games:
+        # Return waiting state if no active game
+        return GameStateResponse(
+            game_id="",
+            arena_address=address,
+            game_type=arena.get("game_type", "prediction"),
+            status=arena.get("game_status", "waiting"),
+            round_number=0,
+            current_challenge=None,
+            leaderboard=[],
+            time_remaining_seconds=0
+        )
+
+    game = game_engine.active_games[game_id]
+    leaderboard = game_engine.get_leaderboard(game_id)
+
+    # Calculate time remaining
+    time_remaining = 0
+    if game.ends_at:
+        try:
+            ends_at = datetime.fromisoformat(game.ends_at.replace("Z", "+00:00"))
+            diff = (ends_at - datetime.now(timezone.utc)).total_seconds()
+            time_remaining = max(0, int(diff))
+        except (ValueError, TypeError):
+            pass
+
+    # Filter challenge data for client (hide answers)
+    challenge = None
+    if game.current_challenge:
+        challenge = {k: v for k, v in game.current_challenge.items()
+                     if k not in ["answer", "secret", "deck"]}
+
+    return GameStateResponse(
+        game_id=game.game_id,
+        arena_address=address,
+        game_type=game.game_type.value,
+        status=game.status,
+        round_number=game.round_number,
+        current_challenge=challenge,
+        leaderboard=leaderboard,
+        time_remaining_seconds=time_remaining
+    )
+
+
+@api_router.post("/arenas/{address}/game/start")
+async def start_arena_game(address: str, _: bool = Depends(verify_admin_key)):
+    """Start the game for an arena (after learning phase)"""
+    arena = await db.arenas.find_one({"address": address})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+
+    if not arena.get("is_closed"):
+        raise HTTPException(status_code=400, detail="Arena registration must be closed first")
+
+    players = arena.get("players", [])
+    if len(players) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 players")
+
+    game_type_str = arena.get("game_type", "prediction")
+    try:
+        game_type = GameType(game_type_str)
+    except ValueError:
+        game_type = GameType.PREDICTION
+
+    # Create new game session
+    game = game_engine.create_game(
+        arena_address=address,
+        game_type=game_type,
+        players=players
+    )
+
+    # Update arena with game ID
+    await db.arenas.update_one(
+        {"address": address},
+        {"$set": {
+            "game_id": game.game_id,
+            "game_status": "learning"
+        }}
+    )
+
+    logger.info(f"Created game {game.game_id} for arena {address}")
+
+    return {
+        "success": True,
+        "game_id": game.game_id,
+        "game_type": game_type.value,
+        "status": "learning",
+        "message": "Game created. Learning phase started."
+    }
+
+
+@api_router.post("/arenas/{address}/game/activate")
+async def activate_arena_game(address: str, _: bool = Depends(verify_admin_key)):
+    """Activate the game after learning phase ends"""
+    arena = await db.arenas.find_one({"address": address})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+
+    game_id = arena.get("game_id")
+    if not game_id or game_id not in game_engine.active_games:
+        raise HTTPException(status_code=400, detail="No active game session")
+
+    game = game_engine.start_game(game_id)
+
+    await db.arenas.update_one(
+        {"address": address},
+        {"$set": {"game_status": "active"}}
+    )
+
+    logger.info(f"Activated game {game_id} for arena {address}")
+
+    return {
+        "success": True,
+        "game_id": game_id,
+        "status": "active",
+        "message": "Game is now active!"
+    }
+
+
+@api_router.post("/arenas/{address}/game/move", response_model=GameMoveResponse)
+async def submit_game_move(address: str, move: GameMove):
+    """Submit a move in the current game"""
+    arena = await db.arenas.find_one({"address": address})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+
+    game_id = arena.get("game_id")
+    if not game_id or game_id not in game_engine.active_games:
+        raise HTTPException(status_code=400, detail="No active game session")
+
+    game = game_engine.active_games[game_id]
+    if game.status != "active":
+        raise HTTPException(status_code=400, detail=f"Game is {game.status}, not active")
+
+    if move.player_address not in arena.get("players", []):
+        raise HTTPException(status_code=403, detail="Player not in this arena")
+
+    # Process the move
+    success, message, result = game_engine.submit_move(
+        game_id=game_id,
+        player_address=move.player_address,
+        move=move.move_data
+    )
+
+    player_score = None
+    if move.player_address in game.players:
+        player_score = game.players[move.player_address].score
+
+    return GameMoveResponse(
+        success=success,
+        message=message,
+        player_score=player_score,
+        game_state=result
+    )
+
+
+@api_router.post("/arenas/{address}/game/advance-round")
+async def advance_game_round(address: str, _: bool = Depends(verify_admin_key)):
+    """Advance to the next round"""
+    arena = await db.arenas.find_one({"address": address})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+
+    game_id = arena.get("game_id")
+    if not game_id:
+        raise HTTPException(status_code=400, detail="No active game session")
+
+    game = game_engine.advance_round(game_id)
+    if not game:
+        raise HTTPException(status_code=400, detail="Could not advance round")
+
+    if game.status == "finished":
+        # Game is complete, store results
+        await db.arenas.update_one(
+            {"address": address},
+            {"$set": {
+                "game_status": "finished",
+                "game_results": {
+                    "winners": game.winners,
+                    "player_scores": {p.address: p.score for p in game.players.values()}
+                }
+            }}
+        )
+        logger.info(f"Game {game_id} finished. Winners: {game.winners}")
+
+    return {
+        "success": True,
+        "game_id": game_id,
+        "status": game.status,
+        "round": game.round_number
+    }
+
+
+@api_router.get("/arenas/{address}/game/leaderboard")
+async def get_game_leaderboard(address: str):
+    """Get current leaderboard for the active game"""
+    arena = await db.arenas.find_one({"address": address})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+
+    game_id = arena.get("game_id")
+    if not game_id:
+        return {"arena_address": address, "leaderboard": []}
+
+    leaderboard = game_engine.get_leaderboard(game_id)
+    return {"arena_address": address, "leaderboard": leaderboard}
+
+
+@api_router.post("/arenas/{address}/game/finish")
+async def finish_arena_game(address: str, _: bool = Depends(verify_admin_key)):
+    """Manually finish a game and determine winners"""
+    arena = await db.arenas.find_one({"address": address})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+
+    game_id = arena.get("game_id")
+    if not game_id or game_id not in game_engine.active_games:
+        raise HTTPException(status_code=400, detail="No active game session")
+
+    game = game_engine.finish_game(game_id)
+
+    # Store results
+    await db.arenas.update_one(
+        {"address": address},
+        {"$set": {
+            "game_status": "finished",
+            "game_results": {
+                "winners": game.winners,
+                "player_scores": {p.address: p.score for p in game.players.values()}
+            }
+        }}
+    )
+
+    logger.info(f"Game {game_id} finished manually. Winners: {game.winners}")
+
+    return {
+        "success": True,
+        "game_id": game_id,
+        "winners": game.winners,
+        "player_scores": {p.address: p.score for p in game.players.values()}
+    }
+
 
 # ===========================================
 # INDEXER ENDPOINTS (for on-chain events)
