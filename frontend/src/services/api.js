@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 const API = `${BACKEND_URL}/api`;
 
 // Admin API key - in production, this should be handled securely
