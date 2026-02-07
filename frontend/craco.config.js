@@ -57,6 +57,28 @@ const webpackConfig = {
         },
       });
 
+      // Disable source-map-loader for @reown packages to suppress warnings
+      // These packages don't ship with source maps but reference them
+      webpackConfig.module.rules = webpackConfig.module.rules.map((rule) => {
+        if (rule.enforce === 'pre' && rule.use) {
+          const uses = Array.isArray(rule.use) ? rule.use : [rule.use];
+          const hasSourceMapLoader = uses.some(
+            (use) => use.loader && use.loader.includes('source-map-loader')
+          );
+          if (hasSourceMapLoader) {
+            return {
+              ...rule,
+              exclude: [
+                ...(rule.exclude || []),
+                /node_modules\/@reown/,
+                /node_modules\/@walletconnect/,
+              ],
+            };
+          }
+        }
+        return rule;
+      });
+
       // Ensure proper handling of ESM modules from @reown and @walletconnect
       webpackConfig.resolve.fallback = {
         ...webpackConfig.resolve.fallback,
