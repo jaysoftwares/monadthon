@@ -583,6 +583,93 @@ class GameEngine:
 
         return total
 
+    def resolve_blackjack_round(self, game_id: str) -> Dict:
+        """
+        Resolve a blackjack round:
+        1. Dealer plays (hits until 17+)
+        2. Compare hands and award points
+        3. Return results
+        """
+        if game_id not in self.active_games:
+            return {"error": "Game not found"}
+
+        game = self.active_games[game_id]
+        if game.game_type != GameType.BLACKJACK:
+            return {"error": "Not a blackjack game"}
+
+        challenge = game.current_challenge
+        if not challenge:
+            return {"error": "No active challenge"}
+
+        dealer_hand = challenge["dealer_hand"]
+        deck = challenge["deck"]
+        deck_pos = challenge["deck_position"]
+
+        # Reveal dealer's hidden card
+        dealer_hand["hidden"] = False
+
+        # Dealer plays: hit until 17 or higher
+        dealer_total = self._calculate_blackjack_hand(dealer_hand["cards"])
+        while dealer_total < 17:
+            new_card = deck[deck_pos]
+            deck_pos += 1
+            dealer_hand["cards"].append(new_card)
+            dealer_total = self._calculate_blackjack_hand(dealer_hand["cards"])
+
+        challenge["deck_position"] = deck_pos
+        dealer_bust = dealer_total > 21
+
+        # Score each player
+        results = {
+            "dealer_cards": dealer_hand["cards"],
+            "dealer_total": dealer_total,
+            "dealer_bust": dealer_bust,
+            "player_results": {}
+        }
+
+        for addr, player_state in game.players.items():
+            hand = challenge["player_hands"].get(addr)
+            if not hand:
+                continue
+
+            player_total = self._calculate_blackjack_hand(hand["cards"])
+            player_bust = hand["status"] == "bust"
+
+            # Determine outcome and points
+            if player_bust:
+                outcome = "bust"
+                points = -10  # Penalty for busting
+            elif dealer_bust:
+                outcome = "win"
+                points = 20  # Dealer bust, player wins
+            elif player_total > dealer_total:
+                outcome = "win"
+                points = 15  # Beat dealer
+            elif player_total == dealer_total:
+                outcome = "push"
+                points = 0  # Tie
+            else:
+                outcome = "lose"
+                points = -5  # Lost to dealer
+
+            # Blackjack bonus (21 with 2 cards)
+            if player_total == 21 and len(hand["cards"]) == 2:
+                outcome = "blackjack"
+                points = 25  # Blackjack pays extra
+
+            # Apply points
+            player_state.score += points
+
+            results["player_results"][addr] = {
+                "cards": hand["cards"],
+                "total": player_total,
+                "outcome": outcome,
+                "points": points,
+                "new_score": player_state.score
+            }
+
+        return results
+
     def advance_round(self, game_id: str) -> Optional[GameState]:
         """Advance to next round or finish game"""
         if game_id not in self.active_games:
@@ -590,6 +677,14 @@ class GameEngine:
 
         game = self.active_games[game_id]
         rules = GAME_RULES[game.game_type]
+
+        # For blackjack, resolve the current round before advancing
+        # This makes the dealer play and awards points
+        if game.game_type == GameType.BLACKJACK and game.current_challenge:
+            round_results = self.resolve_blackjack_round(game_id)
+            # Store results in challenge for frontend display
+            if "player_results" in round_results:
+                game.current_challenge["round_results"] = round_results
 
         # Determine max rounds based on game type
         max_rounds = {
