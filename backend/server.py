@@ -1019,6 +1019,43 @@ async def advance_game_round(address: str, _: bool = Depends(verify_admin_key)):
     }
 
 
+@api_router.post("/arenas/{address}/game/resolve-blackjack")
+async def resolve_blackjack_round(address: str, _: bool = Depends(verify_admin_key)):
+    """
+    Resolve a blackjack round - dealer plays and points are awarded.
+    Call this after all players have acted (hit/stand) to complete the round.
+    """
+    arena = await db.arenas.find_one({"address": address})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+
+    game_id = arena.get("game_id")
+    if not game_id or game_id not in game_engine.active_games:
+        raise HTTPException(status_code=400, detail="No active game session")
+
+    game = game_engine.active_games[game_id]
+    if game.game_type.value != "blackjack":
+        raise HTTPException(status_code=400, detail="Not a blackjack game")
+
+    # Resolve the round (dealer plays, points awarded)
+    results = game_engine.resolve_blackjack_round(game_id)
+
+    if "error" in results:
+        raise HTTPException(status_code=400, detail=results["error"])
+
+    # Get updated leaderboard
+    leaderboard = game_engine.get_leaderboard(game_id)
+
+    return {
+        "success": True,
+        "dealer_cards": results.get("dealer_cards"),
+        "dealer_total": results.get("dealer_total"),
+        "dealer_bust": results.get("dealer_bust"),
+        "player_results": results.get("player_results"),
+        "leaderboard": leaderboard
+    }
+
+
 @api_router.get("/arenas/{address}/game/leaderboard")
 async def get_game_leaderboard(address: str):
     """Get current leaderboard for the active game"""
