@@ -14,7 +14,11 @@ import httpx
 
 from game_engine import (
     GameType, GameEngine, GameState, GAME_RULES,
-    get_game_rules_json, get_all_game_types, game_engine
+    get_game_rules_json, get_all_game_types, game_engine, TournamentMode
+)
+from user_agents import (
+    UserAgentManager, AgentConfig, AgentStrategy, AgentStatus,
+    user_agent_manager
 )
 
 ROOT_DIR = Path(__file__).parent
@@ -1107,6 +1111,311 @@ async def finish_arena_game(address: str, _: bool = Depends(verify_admin_key)):
 
 
 # ===========================================
+# USER AGENT ENDPOINTS
+# ===========================================
+
+class CreateAgentRequest(BaseModel):
+    """Request to create a new user agent"""
+    name: str
+    strategy: str = "balanced"  # conservative, balanced, aggressive, random
+    max_entry_fee_wei: str = "100000000000000000"  # 0.1 MON
+    min_entry_fee_wei: str = "1000000000000000"     # 0.001 MON
+    preferred_games: List[str] = []
+    auto_join: bool = True
+    daily_budget_wei: str = "0"
+
+class UpdateAgentRequest(BaseModel):
+    """Request to update an agent"""
+    name: Optional[str] = None
+    strategy: Optional[str] = None
+    max_entry_fee_wei: Optional[str] = None
+    min_entry_fee_wei: Optional[str] = None
+    preferred_games: Optional[List[str]] = None
+    auto_join: Optional[bool] = None
+    daily_budget_wei: Optional[str] = None
+    status: Optional[str] = None  # active, paused
+
+class AgentResponse(BaseModel):
+    """Agent details response"""
+    agent_id: str
+    owner_address: str
+    name: str
+    strategy: str
+    max_entry_fee_wei: str
+    min_entry_fee_wei: str
+    preferred_games: List[str]
+    auto_join: bool
+    daily_budget_wei: str
+    total_games: int
+    total_wins: int
+    total_earnings_wei: str
+    total_spent_wei: str
+    status: str
+    current_game_id: Optional[str]
+    created_at: str
+    last_active_at: Optional[str]
+    # Computed fields
+    win_rate: float = 0.0
+    net_profit_wei: str = "0"
+
+
+def agent_to_response(agent: AgentConfig) -> AgentResponse:
+    """Convert AgentConfig to response model"""
+    win_rate = (agent.total_wins / agent.total_games * 100) if agent.total_games > 0 else 0.0
+    net_profit = int(agent.total_earnings_wei) - int(agent.total_spent_wei)
+
+    return AgentResponse(
+        agent_id=agent.agent_id,
+        owner_address=agent.owner_address,
+        name=agent.name,
+        strategy=agent.strategy.value,
+        max_entry_fee_wei=agent.max_entry_fee_wei,
+        min_entry_fee_wei=agent.min_entry_fee_wei,
+        preferred_games=agent.preferred_games,
+        auto_join=agent.auto_join,
+        daily_budget_wei=agent.daily_budget_wei,
+        total_games=agent.total_games,
+        total_wins=agent.total_wins,
+        total_earnings_wei=agent.total_earnings_wei,
+        total_spent_wei=agent.total_spent_wei,
+        status=agent.status.value,
+        current_game_id=agent.current_game_id,
+        created_at=agent.created_at,
+        last_active_at=agent.last_active_at,
+        win_rate=round(win_rate, 2),
+        net_profit_wei=str(net_profit),
+    )
+
+
+@api_router.post("/agents/create", response_model=AgentResponse)
+async def create_user_agent(
+    request: CreateAgentRequest,
+    owner_address: str = Query(..., description="Wallet address that owns this agent")
+):
+    """Create a new automated agent for a user"""
+    # Validate strategy
+    try:
+        strategy = AgentStrategy(request.strategy)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid strategy: {request.strategy}")
+
+    # Initialize manager with database
+    user_agent_manager.db = db
+
+    # Create the agent
+    agent = await user_agent_manager.create_agent(
+        owner_address=owner_address,
+        name=request.name,
+        strategy=strategy,
+        max_entry_fee_wei=request.max_entry_fee_wei,
+        min_entry_fee_wei=request.min_entry_fee_wei,
+        preferred_games=request.preferred_games,
+        auto_join=request.auto_join,
+        daily_budget_wei=request.daily_budget_wei,
+    )
+
+    return agent_to_response(agent)
+
+
+@api_router.get("/agents", response_model=List[AgentResponse])
+async def get_user_agents(
+    owner_address: str = Query(..., description="Wallet address to get agents for")
+):
+    """Get all agents owned by an address"""
+    user_agent_manager.db = db
+    agents = await user_agent_manager.get_agents_by_owner(owner_address)
+    return [agent_to_response(a) for a in agents]
+
+
+@api_router.get("/agents/{agent_id}", response_model=AgentResponse)
+async def get_agent(agent_id: str):
+    """Get a specific agent by ID"""
+    user_agent_manager.db = db
+    agent = await user_agent_manager.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent_to_response(agent)
+
+
+@api_router.put("/agents/{agent_id}", response_model=AgentResponse)
+async def update_user_agent(
+    agent_id: str,
+    request: UpdateAgentRequest,
+    owner_address: str = Query(..., description="Owner wallet address for verification")
+):
+    """Update an agent's configuration"""
+    user_agent_manager.db = db
+
+    # Get the agent and verify ownership
+    agent = await user_agent_manager.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.owner_address.lower() != owner_address.lower():
+        raise HTTPException(status_code=403, detail="Not authorized to modify this agent")
+
+    # Build update dict
+    updates = {}
+    if request.name is not None:
+        updates["name"] = request.name
+    if request.strategy is not None:
+        try:
+            updates["strategy"] = AgentStrategy(request.strategy)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid strategy: {request.strategy}")
+    if request.max_entry_fee_wei is not None:
+        updates["max_entry_fee_wei"] = request.max_entry_fee_wei
+    if request.min_entry_fee_wei is not None:
+        updates["min_entry_fee_wei"] = request.min_entry_fee_wei
+    if request.preferred_games is not None:
+        updates["preferred_games"] = request.preferred_games
+    if request.auto_join is not None:
+        updates["auto_join"] = request.auto_join
+    if request.daily_budget_wei is not None:
+        updates["daily_budget_wei"] = request.daily_budget_wei
+    if request.status is not None:
+        try:
+            updates["status"] = AgentStatus(request.status)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {request.status}")
+
+    if updates:
+        await user_agent_manager.update_agent(agent_id, updates)
+
+    # Return updated agent
+    agent = await user_agent_manager.get_agent(agent_id)
+    return agent_to_response(agent)
+
+
+@api_router.delete("/agents/{agent_id}")
+async def delete_user_agent(
+    agent_id: str,
+    owner_address: str = Query(..., description="Owner wallet address for verification")
+):
+    """Delete an agent (only owner can delete)"""
+    user_agent_manager.db = db
+
+    success = await user_agent_manager.delete_agent(agent_id, owner_address)
+    if not success:
+        raise HTTPException(status_code=404, detail="Agent not found or not authorized")
+
+    return {"success": True, "message": "Agent deleted"}
+
+
+@api_router.post("/agents/{agent_id}/start")
+async def start_agent(
+    agent_id: str,
+    owner_address: str = Query(..., description="Owner wallet address for verification")
+):
+    """Start an agent (begin auto-joining games)"""
+    user_agent_manager.db = db
+
+    agent = await user_agent_manager.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.owner_address.lower() != owner_address.lower():
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    success = await user_agent_manager.start_agent(agent_id)
+    return {"success": success, "status": "active"}
+
+
+@api_router.post("/agents/{agent_id}/stop")
+async def stop_agent(
+    agent_id: str,
+    owner_address: str = Query(..., description="Owner wallet address for verification")
+):
+    """Stop an agent (pause auto-joining games)"""
+    user_agent_manager.db = db
+
+    agent = await user_agent_manager.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.owner_address.lower() != owner_address.lower():
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    success = await user_agent_manager.stop_agent(agent_id)
+    return {"success": success, "status": "paused"}
+
+
+@api_router.get("/agents/{agent_id}/history")
+async def get_agent_history(
+    agent_id: str,
+    limit: int = Query(default=20, le=100)
+):
+    """Get an agent's game history"""
+    user_agent_manager.db = db
+
+    agent = await user_agent_manager.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Get game history from database
+    cursor = db.agent_game_history.find(
+        {"agent_id": agent_id}
+    ).sort("played_at", -1).limit(limit)
+
+    history = []
+    async for record in cursor:
+        record.pop('_id', None)
+        history.append(record)
+
+    return {"agent_id": agent_id, "history": history}
+
+
+@api_router.post("/arenas/{address}/join-agent")
+async def join_arena_with_agent(
+    address: str,
+    agent_id: str = Query(...),
+    owner_address: str = Query(...),
+):
+    """Join an arena using an automated agent"""
+    user_agent_manager.db = db
+
+    # Verify agent ownership
+    agent = await user_agent_manager.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.owner_address.lower() != owner_address.lower():
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Get arena
+    arena = await db.arenas.find_one({"address": address})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+
+    # Check if arena is open
+    if arena.get('is_closed') or arena.get('is_finalized'):
+        raise HTTPException(status_code=400, detail="Arena is closed")
+
+    # Check if arena has space
+    players = arena.get('players', [])
+    if len(players) >= arena.get('max_players', 8):
+        raise HTTPException(status_code=400, detail="Arena is full")
+
+    # Create agent player address (prefixed to identify as agent)
+    agent_player_address = f"agent_{agent_id}"
+
+    # Check if already joined
+    if agent_player_address in players:
+        raise HTTPException(status_code=400, detail="Agent already in arena")
+
+    # Add agent to arena
+    await db.arenas.update_one(
+        {"address": address},
+        {"$push": {"players": agent_player_address}}
+    )
+
+    logger.info(f"Agent {agent_id} joined arena {address}")
+
+    return {
+        "success": True,
+        "agent_id": agent_id,
+        "arena_address": address,
+        "player_address": agent_player_address
+    }
+
+
+# ===========================================
 # INDEXER ENDPOINTS (for on-chain events)
 # ===========================================
 
@@ -1157,6 +1466,15 @@ async def startup_event():
         logger.info(f"{network.upper()} - Treasury: {config['treasury'] or 'NOT SET'}")
     logger.info("=" * 50)
 
+    # Initialize and start user agent manager
+    user_agent_manager.db = db
+    await user_agent_manager.start()
+    logger.info("User Agent Manager initialized")
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    # Stop user agent manager
+    await user_agent_manager.stop()
+    logger.info("User Agent Manager stopped")
+
     client.close()

@@ -2,6 +2,7 @@ import React, { createContext, useContext, useCallback, useEffect, useState } fr
 import { useAccount, useConnect, useDisconnect, useSwitchChain, useChainId } from 'wagmi';
 import { useAppKit } from '@reown/appkit/react';
 import { monadTestnet, monadMainnet, supportedChains } from '../config/chains';
+import { setNetwork, getNetworkFromChainId } from '../services/api';
 
 const WalletContext = createContext(null);
 
@@ -33,10 +34,16 @@ export const WalletProvider = ({ children }) => {
   const isTestnet = chainId === monadTestnet.id;
   const isMainnet = chainId === monadMainnet.id;
 
-  // Check if user is on the correct network
+  // Check if user is on the correct network and sync API network
   useEffect(() => {
     if (isConnected && chainId) {
       setWrongNetwork(!isOnMonad);
+
+      // Sync API service with current network
+      const network = getNetworkFromChainId(chainId);
+      if (network) {
+        setNetwork(network);
+      }
     } else {
       setWrongNetwork(false);
     }
@@ -69,12 +76,19 @@ export const WalletProvider = ({ children }) => {
 
   // Helper to check if error is user rejection
   const isUserRejection = (error) => {
+    if (!error) return false;
+    const errorMessage = error?.message || error?.reason || String(error);
+    const errorCode = error?.code;
+    const errorName = error?.name;
+
     return (
-      error?.code === 4001 ||
-      error?.message?.includes('User rejected') ||
-      error?.message?.includes('user rejected') ||
-      error?.message?.includes('User denied') ||
-      error?.name === 'UserRejectedRequestError'
+      errorCode === 4001 ||
+      errorCode === 'ACTION_REJECTED' ||
+      errorName === 'UserRejectedRequestError' ||
+      errorMessage.toLowerCase().includes('user rejected') ||
+      errorMessage.toLowerCase().includes('user denied') ||
+      errorMessage.toLowerCase().includes('user cancelled') ||
+      errorMessage.toLowerCase().includes('rejected the request')
     );
   };
 

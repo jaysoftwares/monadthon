@@ -34,6 +34,12 @@ class GameType(Enum):
     BLACKJACK = "blackjack"
 
 
+class TournamentMode(Enum):
+    """Tournament format modes"""
+    STANDARD = "standard"  # All players compete, top scores win
+    ELIMINATION = "elimination"  # Bracket-style knockout rounds
+
+
 @dataclass
 class GameRules:
     """Rules and tutorial content for a game type"""
@@ -55,6 +61,46 @@ class PlayerState:
     moves: List[Dict] = field(default_factory=list)
     is_eliminated: bool = False
     final_rank: Optional[int] = None
+    bracket_position: Optional[int] = None  # Position in elimination bracket
+
+
+@dataclass
+class BracketMatch:
+    """A single match in an elimination bracket"""
+    match_id: str
+    round_number: int  # 1 = finals, 2 = semis, etc.
+    player1: Optional[str] = None
+    player2: Optional[str] = None
+    player1_score: int = 0
+    player2_score: int = 0
+    winner: Optional[str] = None
+    status: str = "pending"  # pending, active, completed
+    next_match_id: Optional[str] = None  # Winner goes to this match
+
+
+@dataclass
+class EliminationBracket:
+    """Manages bracket-style elimination tournaments"""
+    bracket_id: str
+    total_players: int
+    total_rounds: int
+    matches: Dict[str, BracketMatch] = field(default_factory=dict)
+    current_round: int = 1
+    current_match_index: int = 0
+
+    @staticmethod
+    def calculate_rounds(num_players: int) -> int:
+        """Calculate number of rounds needed for bracket"""
+        import math
+        return math.ceil(math.log2(num_players))
+
+    @staticmethod
+    def next_power_of_two(n: int) -> int:
+        """Get next power of 2 >= n"""
+        power = 1
+        while power < n:
+            power *= 2
+        return power
 
 
 @dataclass
@@ -72,6 +118,10 @@ class GameState:
     winners: List[str] = field(default_factory=list)
     prize_amounts: List[str] = field(default_factory=list)
     seed: str = ""  # Provably fair seed from block hash
+    # Elimination mode fields
+    tournament_mode: TournamentMode = TournamentMode.STANDARD
+    bracket: Optional[EliminationBracket] = None
+    current_match: Optional[BracketMatch] = None
 
 
 # Game Rules Definitions
@@ -221,6 +271,283 @@ class GameEngine:
 
         self.active_games[game_id] = game_state
         return game_state
+
+    def create_elimination_game(
+        self,
+        arena_address: str,
+        game_type: GameType,
+        players: List[str],
+        block_hash: str = None,
+    ) -> GameState:
+        """Create an elimination bracket tournament"""
+        game_id = hashlib.sha256(
+            f"{arena_address}{time.time()}{random.random()}".encode()
+        ).hexdigest()[:16]
+
+        if block_hash:
+            seed = block_hash
+        else:
+            seed = hashlib.sha256(f"{game_id}{time.time()}".encode()).hexdigest()
+
+        # Shuffle players for random bracket seeding
+        rng = random.Random(seed)
+        shuffled_players = players.copy()
+        rng.shuffle(shuffled_players)
+
+        # Calculate bracket size (must be power of 2)
+        num_players = len(shuffled_players)
+        bracket_size = EliminationBracket.next_power_of_two(num_players)
+        num_rounds = EliminationBracket.calculate_rounds(num_players)
+
+        # Create bracket
+        bracket = EliminationBracket(
+            bracket_id=f"bracket_{game_id}",
+            total_players=num_players,
+            total_rounds=num_rounds,
+        )
+
+        # Create all matches for the bracket
+        match_count = 0
+        matches_per_round = bracket_size // 2
+
+        for round_num in range(num_rounds, 0, -1):
+            for match_idx in range(matches_per_round):
+                match_id = f"r{round_num}_m{match_idx}"
+                next_match = None
+                if round_num > 1:
+                    next_match = f"r{round_num - 1}_m{match_idx // 2}"
+
+                bracket.matches[match_id] = BracketMatch(
+                    match_id=match_id,
+                    round_number=round_num,
+                    next_match_id=next_match,
+                )
+                match_count += 1
+
+            matches_per_round //= 2
+
+        # Seed first round with players (byes for missing players)
+        first_round = num_rounds
+        player_idx = 0
+        for match_idx in range(bracket_size // 2):
+            match_id = f"r{first_round}_m{match_idx}"
+            match = bracket.matches[match_id]
+
+            if player_idx < num_players:
+                match.player1 = shuffled_players[player_idx]
+                player_idx += 1
+            if player_idx < num_players:
+                match.player2 = shuffled_players[player_idx]
+                player_idx += 1
+
+            # Handle byes (if only one player in match)
+            if match.player1 and not match.player2:
+                match.winner = match.player1
+                match.status = "completed"
+                self._advance_winner_in_bracket(bracket, match)
+            elif match.player2 and not match.player1:
+                match.winner = match.player2
+                match.status = "completed"
+                self._advance_winner_in_bracket(bracket, match)
+
+        # Initialize player states
+        player_states = {}
+        for i, addr in enumerate(shuffled_players):
+            player_states[addr] = PlayerState(
+                address=addr,
+                bracket_position=i + 1,
+            )
+
+        now = datetime.now(timezone.utc)
+        rules = GAME_RULES[game_type]
+
+        # Elimination tournaments take longer
+        total_duration = rules.duration_seconds * num_rounds + 60
+
+        game_state = GameState(
+            game_id=game_id,
+            arena_address=arena_address,
+            game_type=game_type,
+            status="learning",
+            players=player_states,
+            started_at=now.isoformat(),
+            ends_at=(now + timedelta(seconds=total_duration)).isoformat(),
+            seed=seed,
+            tournament_mode=TournamentMode.ELIMINATION,
+            bracket=bracket,
+        )
+
+        self.active_games[game_id] = game_state
+        return game_state
+
+    def _advance_winner_in_bracket(self, bracket: EliminationBracket, match: BracketMatch):
+        """Advance winner to next match in bracket"""
+        if not match.next_match_id or not match.winner:
+            return
+
+        next_match = bracket.matches.get(match.next_match_id)
+        if not next_match:
+            return
+
+        # Place winner in next match
+        if next_match.player1 is None:
+            next_match.player1 = match.winner
+        else:
+            next_match.player2 = match.winner
+
+    def get_next_bracket_match(self, game_id: str) -> Optional[BracketMatch]:
+        """Get the next pending match in the bracket"""
+        game = self.active_games.get(game_id)
+        if not game or not game.bracket:
+            return None
+
+        # Find first pending match where both players are set
+        for round_num in range(game.bracket.total_rounds, 0, -1):
+            for match in game.bracket.matches.values():
+                if (match.round_number == round_num and
+                    match.status == "pending" and
+                    match.player1 and match.player2):
+                    return match
+
+        return None
+
+    def start_bracket_match(self, game_id: str, match_id: str) -> Optional[Dict]:
+        """Start a specific match in the bracket"""
+        game = self.active_games.get(game_id)
+        if not game or not game.bracket:
+            return None
+
+        match = game.bracket.matches.get(match_id)
+        if not match or match.status != "pending":
+            return None
+
+        match.status = "active"
+        game.current_match = match
+
+        # Reset scores for this match
+        match.player1_score = 0
+        match.player2_score = 0
+
+        # Generate challenge for this match
+        game.current_challenge = self._generate_challenge(game)
+        game.current_challenge["match_id"] = match_id
+        game.current_challenge["player1"] = match.player1
+        game.current_challenge["player2"] = match.player2
+
+        return {
+            "match_id": match_id,
+            "player1": match.player1,
+            "player2": match.player2,
+            "round_number": match.round_number,
+            "challenge": game.current_challenge,
+        }
+
+    def complete_bracket_match(self, game_id: str, match_id: str) -> Optional[Dict]:
+        """Complete a bracket match and determine winner"""
+        game = self.active_games.get(game_id)
+        if not game or not game.bracket:
+            return None
+
+        match = game.bracket.matches.get(match_id)
+        if not match or match.status != "active":
+            return None
+
+        # Determine winner based on scores
+        p1 = game.players.get(match.player1)
+        p2 = game.players.get(match.player2)
+
+        if p1 and p2:
+            match.player1_score = p1.score
+            match.player2_score = p2.score
+
+            if p1.score > p2.score:
+                match.winner = match.player1
+                p2.is_eliminated = True
+            elif p2.score > p1.score:
+                match.winner = match.player2
+                p1.is_eliminated = True
+            else:
+                # Tie breaker: random based on seed
+                rng = random.Random(f"{game.seed}{match_id}")
+                match.winner = rng.choice([match.player1, match.player2])
+                loser = match.player2 if match.winner == match.player1 else match.player1
+                game.players[loser].is_eliminated = True
+
+        match.status = "completed"
+
+        # Advance winner to next match
+        self._advance_winner_in_bracket(game.bracket, match)
+
+        # Reset player scores for next match
+        if p1:
+            p1.score = 0
+        if p2:
+            p2.score = 0
+
+        # Check if tournament is complete (finals done)
+        finals_match = game.bracket.matches.get("r1_m0")
+        if finals_match and finals_match.status == "completed":
+            game.status = "finished"
+            game.winners = [finals_match.winner] if finals_match.winner else []
+
+            # Determine 2nd place (finals loser)
+            if finals_match.player1 and finals_match.player2:
+                second = finals_match.player2 if finals_match.winner == finals_match.player1 else finals_match.player1
+                game.winners.append(second)
+
+        return {
+            "match_id": match_id,
+            "winner": match.winner,
+            "player1_score": match.player1_score,
+            "player2_score": match.player2_score,
+            "tournament_complete": game.status == "finished",
+            "next_match": self.get_next_bracket_match(game_id),
+        }
+
+    def get_bracket_state(self, game_id: str) -> Optional[Dict]:
+        """Get full bracket state for display"""
+        game = self.active_games.get(game_id)
+        if not game or not game.bracket:
+            return None
+
+        bracket = game.bracket
+        rounds = {}
+
+        for round_num in range(1, bracket.total_rounds + 1):
+            round_matches = [
+                {
+                    "match_id": m.match_id,
+                    "player1": m.player1,
+                    "player2": m.player2,
+                    "player1_score": m.player1_score,
+                    "player2_score": m.player2_score,
+                    "winner": m.winner,
+                    "status": m.status,
+                }
+                for m in bracket.matches.values()
+                if m.round_number == round_num
+            ]
+            round_name = self._get_round_name(round_num, bracket.total_rounds)
+            rounds[round_name] = sorted(round_matches, key=lambda x: x["match_id"])
+
+        return {
+            "bracket_id": bracket.bracket_id,
+            "total_players": bracket.total_players,
+            "total_rounds": bracket.total_rounds,
+            "rounds": rounds,
+            "current_match": game.current_match.match_id if game.current_match else None,
+        }
+
+    def _get_round_name(self, round_num: int, total_rounds: int) -> str:
+        """Get display name for a round"""
+        if round_num == 1:
+            return "Finals"
+        elif round_num == 2:
+            return "Semi-Finals"
+        elif round_num == 3:
+            return "Quarter-Finals"
+        else:
+            return f"Round of {2 ** round_num}"
 
     def start_game(self, game_id: str) -> GameState:
         """Transition game from learning to active"""
