@@ -13,6 +13,7 @@ import LobbyPage from './pages/LobbyPage';
 import ArenaPage from './pages/ArenaPage';
 import LeaderboardPage from './pages/LeaderboardPage';
 import AdminPage from './pages/AdminPage';
+import AgentsPage from './pages/AgentsPage';
 import './App.css';
 
 // Create a React Query client
@@ -52,6 +53,7 @@ function App() {
                     <Route path="/" element={<LobbyPage />} />
                     <Route path="/arena/:address" element={<ArenaPage />} />
                     <Route path="/leaderboard" element={<LeaderboardPage />} />
+                    <Route path="/agents" element={<AgentsPage />} />
                     <Route path="/admin" element={<AdminPage />} />
                   </Routes>
                 </main>
