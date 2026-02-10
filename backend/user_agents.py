@@ -2,9 +2,14 @@
 CLAW ARENA - User Agent System
 
 Allows users to create automated agents that:
-1. Join tournaments automatically
+1. Join tournaments automatically (with EIP-712 authorization)
 2. Play games using configurable strategies
-3. Earn rewards while users are away
+3. Play games on behalf of users who manually joined
+4. Earn rewards while users are away
+
+Two modes:
+- AUTO-JOIN: Agent uses EIP-712 signature authorization to join arenas
+- AUTO-PLAY: Agent plays games for users who manually joined an arena
 
 This enables "passive income" gameplay where agents compete 24/7.
 """
@@ -16,13 +21,19 @@ import hashlib
 import time
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 import httpx
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('user_agents')
+
+
+class AgentMode(Enum):
+    """How the agent operates"""
+    AUTO_PLAY = "auto_play"    # Only plays games user manually joined
+    AUTO_JOIN = "auto_join"    # Joins and plays games automatically (needs authorization)
 
 
 class AgentStrategy(Enum):
@@ -55,6 +66,13 @@ class AgentConfig:
     max_concurrent_games: int = 1       # Max games to play simultaneously
     daily_budget_wei: str = "0"         # Daily spending limit (0 = unlimited)
 
+    # Mode determines how agent operates
+    mode: AgentMode = AgentMode.AUTO_PLAY  # Default to safe auto-play only
+
+    # Authorization status (for auto-join mode)
+    has_authorization: bool = False
+    authorization_expires_at: Optional[str] = None
+
     # Stats
     total_games: int = 0
     total_wins: int = 0
@@ -64,6 +82,7 @@ class AgentConfig:
     # Status
     status: AgentStatus = AgentStatus.ACTIVE
     current_game_id: Optional[str] = None
+    current_arena_address: Optional[str] = None  # Arena being played
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_active_at: Optional[str] = None
 
@@ -121,10 +140,17 @@ class UserAgentManager:
         max_entry_fee_wei: str = "100000000000000000",  # 0.1 MON default
         min_entry_fee_wei: str = "1000000000000000",    # 0.001 MON default
         preferred_games: List[str] = None,
-        auto_join: bool = True,
+        auto_join: bool = False,  # Default to False (safer - auto_play mode)
         daily_budget_wei: str = "0",
+        mode: AgentMode = AgentMode.AUTO_PLAY,  # Default to auto-play only
     ) -> AgentConfig:
-        """Create a new user agent"""
+        """
+        Create a new user agent.
+
+        Modes:
+        - AUTO_PLAY: Agent only plays games that user manually joined
+        - AUTO_JOIN: Agent joins and plays games automatically (needs authorization)
+        """
 
         # Generate unique agent ID
         agent_id = hashlib.sha256(
@@ -141,17 +167,22 @@ class UserAgentManager:
             preferred_games=preferred_games or [],
             auto_join=auto_join,
             daily_budget_wei=daily_budget_wei,
+            mode=mode,
         )
 
         # Save to database
         if self.db:
-            await self.db.user_agents.insert_one(asdict(agent))
+            agent_data = asdict(agent)
+            # Convert enums to strings for MongoDB
+            agent_data['strategy'] = agent.strategy.value
+            agent_data['status'] = agent.status.value
+            agent_data['mode'] = agent.mode.value
+            await self.db.user_agents.insert_one(agent_data)
 
-        logger.info(f"Created agent {agent_id} for {owner_address}")
+        logger.info(f"Created agent {agent_id} for {owner_address} (mode: {mode.value})")
 
-        # Start the agent if auto_join is enabled
-        if auto_join:
-            await self.start_agent(agent_id)
+        # Start the agent
+        await self.start_agent(agent_id)
 
         return agent
 
@@ -166,6 +197,10 @@ class UserAgentManager:
             # Convert string enums back
             data['strategy'] = AgentStrategy(data['strategy'])
             data['status'] = AgentStatus(data['status'])
+            if 'mode' in data:
+                data['mode'] = AgentMode(data['mode'])
+            else:
+                data['mode'] = AgentMode.AUTO_PLAY  # Default for old agents
             return AgentConfig(**data)
         return None
 
@@ -180,6 +215,10 @@ class UserAgentManager:
             data.pop('_id', None)
             data['strategy'] = AgentStrategy(data['strategy'])
             data['status'] = AgentStatus(data['status'])
+            if 'mode' in data:
+                data['mode'] = AgentMode(data['mode'])
+            else:
+                data['mode'] = AgentMode.AUTO_PLAY
             agents.append(AgentConfig(**data))
         return agents
 
@@ -194,6 +233,10 @@ class UserAgentManager:
             data.pop('_id', None)
             data['strategy'] = AgentStrategy(data['strategy'])
             data['status'] = AgentStatus(data['status'])
+            if 'mode' in data:
+                data['mode'] = AgentMode(data['mode'])
+            else:
+                data['mode'] = AgentMode.AUTO_PLAY
             agents.append(AgentConfig(**data))
         return agents
 
@@ -212,6 +255,8 @@ class UserAgentManager:
             updates['strategy'] = updates['strategy'].value
         if 'status' in updates and isinstance(updates['status'], AgentStatus):
             updates['status'] = updates['status'].value
+        if 'mode' in updates and isinstance(updates['mode'], AgentMode):
+            updates['mode'] = updates['mode'].value
 
         result = await self.db.user_agents.update_one(
             {"agent_id": agent_id},
