@@ -8,7 +8,7 @@ import { Skeleton } from '../components/ui/skeleton';
 import CountdownTimer from '../components/CountdownTimer';
 import {
   ArrowLeft, Users, Coins, Trophy, Clock, ExternalLink,
-  CheckCircle, XCircle, Loader2, Copy, Check, Bot, Timer
+  CheckCircle, XCircle, Loader2, Copy, Check, Bot, Timer, Globe, AlertTriangle
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -147,7 +147,17 @@ const ArenaPage = () => {
           
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
-              <h1 className="font-heading text-3xl font-bold text-gray-900" data-testid="arena-name">{arena.name}</h1>
+              <div className="flex items-center gap-3">
+                <h1 className="font-heading text-3xl font-bold text-gray-900" data-testid="arena-name">{arena.name}</h1>
+                <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium ${
+                  arena.network === 'mainnet'
+                    ? 'bg-green-100 text-green-700'
+                    : 'bg-yellow-100 text-yellow-700'
+                }`}>
+                  <Globe className="w-3 h-3" />
+                  {arena.network === 'mainnet' ? 'Mainnet' : 'Testnet'}
+                </span>
+              </div>
               <div className="flex items-center gap-2 mt-2">
                 <span className="font-mono text-sm text-gray-500">{address}</span>
                 <button onClick={copyAddress} className="text-gray-400 hover:text-[#836EF9]" data-testid="copy-address-btn">
@@ -168,6 +178,18 @@ const ArenaPage = () => {
           </div>
         </div>
       </div>
+
+      {/* Mainnet Warning */}
+      {arena.network === 'mainnet' && !arena.is_finalized && (
+        <div className="bg-green-50 border-b border-green-200 px-4 py-3">
+          <div className="max-w-4xl mx-auto flex items-center justify-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-green-600" />
+            <span className="text-sm font-medium text-green-700">
+              This tournament is on <span className="font-semibold">Monad Mainnet</span> &mdash; real MON is required to join
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Content */}
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">

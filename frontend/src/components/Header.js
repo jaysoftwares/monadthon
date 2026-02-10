@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useCallback } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useWallet } from '../context/WalletContext';
 import { Button } from '../components/ui/button';
@@ -18,7 +18,16 @@ const Header = () => {
     switchToMonad,
   } = useWallet();
   const location = useLocation();
-  const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Global network change counter – bumped so pages can subscribe and refetch
+  const [networkChangeKey, setNetworkChangeKey] = useState(0);
+
+  const handleNetworkChange = useCallback(() => {
+    setNetworkChangeKey((k) => k + 1);
+    // Dispatch a custom event so any page component can listen
+    window.dispatchEvent(new CustomEvent('network-changed'));
+  }, []);
 
   const navLinks = [
     { path: '/', label: 'Lobby' },
@@ -62,10 +71,10 @@ const Header = () => {
 
             {/* Network Switcher & Wallet Button */}
             <div className="flex items-center gap-3">
-              {/* Network Switcher - only show when connected to Monad */}
-              {isConnected && !wrongNetwork && (
+              {/* Network Switcher - always visible (works in browse mode when disconnected) */}
+              {(!isConnected || (isConnected && !wrongNetwork)) && (
                 <div className="hidden sm:block">
-                  <NetworkSwitcher />
+                  <NetworkSwitcher onNetworkChange={handleNetworkChange} />
                 </div>
               )}
 
@@ -127,6 +136,11 @@ const Header = () => {
           {/* Mobile Navigation */}
           {mobileMenuOpen && (
             <nav className="md:hidden py-4 border-t border-gray-100" data-testid="mobile-nav">
+              {/* Network Switcher in mobile menu */}
+              <div className="pb-3 mb-3 border-b border-gray-100">
+                <NetworkSwitcher onNetworkChange={handleNetworkChange} />
+              </div>
+
               {navLinks.map((link) => (
                 <Link
                   key={link.path}
