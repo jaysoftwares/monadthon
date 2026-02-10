@@ -116,7 +116,7 @@ class UserAgentManager:
         logger.info("User Agent Manager started")
 
         # Load and start all active agents
-        if self.db:
+        if self.db is not None:
             agents = await self.get_all_active_agents()
             for agent in agents:
                 await self.start_agent(agent.agent_id)
@@ -171,7 +171,7 @@ class UserAgentManager:
         )
 
         # Save to database
-        if self.db:
+        if self.db is not None:
             agent_data = asdict(agent)
             # Convert enums to strings for MongoDB
             agent_data['strategy'] = agent.strategy.value
@@ -188,7 +188,7 @@ class UserAgentManager:
 
     async def get_agent(self, agent_id: str) -> Optional[AgentConfig]:
         """Get an agent by ID"""
-        if not self.db:
+        if self.db is None:
             return None
 
         data = await self.db.user_agents.find_one({"agent_id": agent_id})
@@ -206,7 +206,7 @@ class UserAgentManager:
 
     async def get_agents_by_owner(self, owner_address: str) -> List[AgentConfig]:
         """Get all agents owned by an address"""
-        if not self.db:
+        if self.db is None:
             return []
 
         agents = []
@@ -224,7 +224,7 @@ class UserAgentManager:
 
     async def get_all_active_agents(self) -> List[AgentConfig]:
         """Get all active agents"""
-        if not self.db:
+        if self.db is None:
             return []
 
         agents = []
@@ -242,7 +242,7 @@ class UserAgentManager:
 
     async def update_agent(self, agent_id: str, updates: Dict) -> bool:
         """Update agent configuration"""
-        if not self.db:
+        if self.db is None:
             return False
 
         # Don't allow updating certain fields
@@ -266,7 +266,7 @@ class UserAgentManager:
 
     async def delete_agent(self, agent_id: str, owner_address: str) -> bool:
         """Delete an agent (only owner can delete)"""
-        if not self.db:
+        if self.db is None:
             return False
 
         # Stop the agent first
