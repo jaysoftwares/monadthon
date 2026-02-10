@@ -191,28 +191,28 @@ class API:
 
     async def start_game(self, addr: str) -> dict:
         r = await self.client.post(
-            f"{self.base}/api/admin/arena/{addr}/game/start",
+            f"{self.base}/api/arenas/{addr}/game/start",
             headers=self._admin_headers(),
         )
         return r.json() if r.status_code == 200 else {"error": r.text}
 
     async def activate_game(self, addr: str) -> dict:
         r = await self.client.post(
-            f"{self.base}/api/admin/arena/{addr}/game/activate",
+            f"{self.base}/api/arenas/{addr}/game/activate",
             headers=self._admin_headers(),
         )
         return r.json() if r.status_code == 200 else {"error": r.text}
 
     async def advance_round(self, addr: str) -> dict:
         r = await self.client.post(
-            f"{self.base}/api/admin/arena/{addr}/game/advance-round",
+            f"{self.base}/api/arenas/{addr}/game/advance-round",
             headers=self._admin_headers(),
         )
         return r.json() if r.status_code == 200 else {"error": r.text}
 
     async def finish_game(self, addr: str) -> dict:
         r = await self.client.post(
-            f"{self.base}/api/admin/arena/{addr}/game/finish",
+            f"{self.base}/api/arenas/{addr}/game/finish",
             headers=self._admin_headers(),
         )
         return r.json() if r.status_code == 200 else {"error": r.text}
@@ -621,8 +621,8 @@ class DemoOrchestrator:
             prize_pool = total_pool - protocol_fee
 
             # Get winners from game results
-            game_results = arena.get("game_results", {})
-            winners = game_results.get("winners", players[:2] if len(players) >= 2 else players)
+            game_results = arena.get("game_results") or {}
+            winners = game_results.get("winners") or (players[:2] if len(players) >= 2 else players)
 
             if len(winners) >= 2:
                 amounts = [str(int(prize_pool * 0.7)), str(int(prize_pool * 0.3))]
