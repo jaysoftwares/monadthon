@@ -23,6 +23,7 @@ const Header = () => {
   const navLinks = [
     { path: '/', label: 'Lobby' },
     { path: '/leaderboard', label: 'Leaderboard' },
+    { path: '/agents', label: 'My Agents' },
     // Admin route exists at /admin but hidden from nav - only accessible via direct URL
   ];
 
