@@ -3,10 +3,12 @@ import { Link } from 'react-router-dom';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import CountdownTimer from './CountdownTimer';
-import { Users, Coins, ArrowRight, Clock, Bot } from 'lucide-react';
+import { Users, Coins, ArrowRight, Clock, Bot, Globe } from 'lucide-react';
 import { formatMON, getExplorerUrl } from '../services/api';
 
 const ArenaCard = ({ arena }) => {
+  const isMainnet = arena.network === 'mainnet';
+
   const getStatusBadge = () => {
     if (arena.is_finalized) {
       return <Badge className="badge-finalized" data-testid={`arena-status-${arena.address}`}>Finalized</Badge>;
@@ -31,9 +33,19 @@ const ArenaCard = ({ arena }) => {
           <h3 className="font-heading font-semibold text-lg text-gray-900 group-hover:text-[#836EF9] transition-colors">
             {arena.name}
           </h3>
-          <p className="font-mono text-xs text-gray-400 mt-1">
-            {arena.address?.slice(0, 10)}...{arena.address?.slice(-8)}
-          </p>
+          <div className="flex items-center gap-2 mt-1">
+            <p className="font-mono text-xs text-gray-400">
+              {arena.address?.slice(0, 10)}...{arena.address?.slice(-8)}
+            </p>
+            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+              isMainnet
+                ? 'bg-green-100 text-green-700'
+                : 'bg-yellow-100 text-yellow-700'
+            }`}>
+              <Globe className="w-2.5 h-2.5" />
+              {isMainnet ? 'Mainnet' : 'Testnet'}
+            </span>
+          </div>
         </div>
         {getStatusBadge()}
       </div>

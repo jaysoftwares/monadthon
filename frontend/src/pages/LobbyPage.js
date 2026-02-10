@@ -1,17 +1,20 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { getArenas, getLeaderboard, getAgentStatus, formatMON } from '../services/api';
+import { getArenas, getLeaderboard, getAgentStatus, getNetwork, formatMON } from '../services/api';
+import { useWallet } from '../context/WalletContext';
 import ArenaCard from '../components/ArenaCard';
 import CountdownTimer from '../components/CountdownTimer';
 import { Button } from '../components/ui/button';
 import { Skeleton } from '../components/ui/skeleton';
-import { Trophy, Users, Coins, Zap, ArrowRight, Bot, Activity } from 'lucide-react';
+import { Trophy, Users, Coins, Zap, ArrowRight, Bot, Activity, Globe } from 'lucide-react';
 
 const LobbyPage = () => {
+  const { chainId, isConnected } = useWallet();
   const [arenas, setArenas] = useState([]);
   const [topPlayers, setTopPlayers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [agentStatus, setAgentStatus] = useState(null);
+  const [currentNetworkLabel, setCurrentNetworkLabel] = useState(getNetwork());
   const [stats, setStats] = useState({
     totalArenas: 0,
     totalPlayers: 0,
@@ -20,6 +23,7 @@ const LobbyPage = () => {
 
   const fetchData = useCallback(async () => {
     try {
+      setLoading(true);
       const [arenasData, leaderboardData] = await Promise.all([
         getArenas(),
         getLeaderboard(3),
@@ -27,6 +31,7 @@ const LobbyPage = () => {
 
       setArenas(arenasData);
       setTopPlayers(leaderboardData);
+      setCurrentNetworkLabel(getNetwork());
 
       // Calculate stats
       const totalPlayers = arenasData.reduce((acc, arena) => acc + (arena.players?.length || 0), 0);
@@ -63,8 +68,26 @@ const LobbyPage = () => {
 
     // Refresh agent status every 30 seconds
     const agentInterval = setInterval(fetchAgentStatus, 30000);
-    return () => clearInterval(agentInterval);
+
+    // Listen for network changes from NetworkSwitcher
+    const handleNetworkChange = () => {
+      fetchData();
+      fetchAgentStatus();
+    };
+    window.addEventListener('network-changed', handleNetworkChange);
+
+    return () => {
+      clearInterval(agentInterval);
+      window.removeEventListener('network-changed', handleNetworkChange);
+    };
   }, [fetchData]);
+
+  // Re-fetch when wallet chain changes (connected user switching via wallet)
+  useEffect(() => {
+    if (isConnected && chainId) {
+      fetchData();
+    }
+  }, [chainId, isConnected, fetchData]);
 
   const openArenas = arenas.filter(a => !a.is_closed && !a.is_finalized);
   const closedArenas = arenas.filter(a => a.is_closed || a.is_finalized);
@@ -201,13 +224,29 @@ const LobbyPage = () => {
         </section>
       )}
 
+      {/* Mainnet Info Banner */}
+      {currentNetworkLabel === 'mainnet' && (
+        <section className="py-3 bg-green-50 border-b border-green-200" data-testid="mainnet-banner">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-center gap-2">
+            <Globe className="w-4 h-4 text-green-600" />
+            <span className="text-sm font-medium text-green-700">
+              You are viewing <span className="font-semibold">Monad Mainnet</span> tournaments &mdash; real MON is at stake
+            </span>
+          </div>
+        </section>
+      )}
+
       {/* Open Arenas */}
       <section className="py-16 bg-white" data-testid="open-arenas-section">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between mb-8">
             <div>
               <h2 className="font-heading text-2xl font-bold text-gray-900">Open Tournaments</h2>
-              <p className="text-gray-500 mt-1">Join now and compete for prizes</p>
+              <p className="text-gray-500 mt-1">
+                {currentNetworkLabel === 'mainnet'
+                  ? 'Compete for real MON prizes on Mainnet'
+                  : 'Join now and compete for prizes'}
+              </p>
             </div>
           </div>
 

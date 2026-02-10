@@ -1,26 +1,42 @@
-import React, { useState, useEffect } from 'react';
-import { getLeaderboard, formatMON, getExplorerUrl } from '../services/api';
+import React, { useState, useEffect, useCallback } from 'react';
+import { getLeaderboard, formatMON, getExplorerUrl, getNetwork } from '../services/api';
+import { useWallet } from '../context/WalletContext';
 import { Skeleton } from '../components/ui/skeleton';
-import { Trophy, Medal, ExternalLink, Users, Coins, Target } from 'lucide-react';
+import { Trophy, Medal, ExternalLink, Users, Coins, Target, Globe } from 'lucide-react';
 
 const LeaderboardPage = () => {
+  const { chainId, isConnected } = useWallet();
   const [leaderboard, setLeaderboard] = useState([]);
   const [loading, setLoading] = useState(true);
+  const currentNetwork = getNetwork();
+
+  const fetchLeaderboard = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await getLeaderboard(50);
+      setLeaderboard(data);
+    } catch (error) {
+      console.error('Failed to fetch leaderboard:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const fetchLeaderboard = async () => {
-      try {
-        const data = await getLeaderboard(50);
-        setLeaderboard(data);
-      } catch (error) {
-        console.error('Failed to fetch leaderboard:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchLeaderboard();
-  }, []);
+
+    // Listen for network changes from NetworkSwitcher
+    const handleNetworkChange = () => fetchLeaderboard();
+    window.addEventListener('network-changed', handleNetworkChange);
+    return () => window.removeEventListener('network-changed', handleNetworkChange);
+  }, [fetchLeaderboard]);
+
+  // Re-fetch when wallet chain changes
+  useEffect(() => {
+    if (isConnected && chainId) {
+      fetchLeaderboard();
+    }
+  }, [chainId, isConnected, fetchLeaderboard]);
 
   const getRankStyle = (index) => {
     switch (index) {
@@ -50,7 +66,17 @@ const LeaderboardPage = () => {
               <Trophy className="w-8 h-8 text-white" />
             </div>
             <h1 className="font-heading text-4xl font-bold text-gray-900">Leaderboard</h1>
-            <p className="text-gray-500 mt-2">Top performers in CLAW ARENA</p>
+            <p className="text-gray-500 mt-2">
+              Top performers in CLAW ARENA
+              <span className={`ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
+                currentNetwork === 'mainnet'
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-yellow-100 text-yellow-700'
+              }`}>
+                <Globe className="w-3 h-3" />
+                {currentNetwork === 'mainnet' ? 'Mainnet' : 'Testnet'}
+              </span>
+            </p>
           </div>
 
           {/* Stats */}
