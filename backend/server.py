@@ -33,7 +33,7 @@ db = client[os.environ.get('DB_NAME', 'claw_arena')]
 # Environment Configuration
 # ===========================================
 
-ADMIN_API_KEY = os.environ.get('ADMIN_API_KEY', '')
+ADMIN_API_KEY = os.environ.get('ADMIN_API_KEY', 'claw-arena-admin-key')
 DEFAULT_NETWORK = os.environ.get('DEFAULT_NETWORK', 'testnet')
 
 # Network Configuration
