@@ -43,7 +43,7 @@ import time
 import httpx
 from dotenv import load_dotenv
 
-from game_engine import GameType, GameEngine, GAME_RULES, get_game_rules_json
+from game_engine import GameType, GameEngine, GAME_RULES, get_game_rules_json, TournamentMode
 
 load_dotenv()
 
@@ -65,11 +65,12 @@ logger = logging.getLogger('autonomous_agent')
 
 class TournamentTier(Enum):
     """Tournament tiers based on entry fee"""
-    MICRO = "micro"      # 0.001 - 0.01 MON
-    SMALL = "small"      # 0.01 - 0.1 MON
-    MEDIUM = "medium"    # 0.1 - 1 MON
-    LARGE = "large"      # 1 - 10 MON
-    WHALE = "whale"      # 10+ MON
+    MICRO = "micro"           # 0.001 - 0.01 MON
+    SMALL = "small"           # 0.01 - 0.1 MON
+    MEDIUM = "medium"         # 0.1 - 1 MON
+    LARGE = "large"           # 1 - 10 MON
+    WHALE = "whale"           # 10 - 100 MON
+    HIGH_ROLLER = "high_roller"  # 100+ MON - Ultimate high stakes
 
 
 @dataclass
@@ -81,6 +82,7 @@ class TournamentConfig:
     protocol_fee_bps: int
     tier: TournamentTier
     game_type: GameType  # The game mode for this tournament
+    tournament_mode: TournamentMode  # Standard or elimination bracket
     reason: str  # Why the agent chose these parameters
     registration_deadline_minutes: int = 60  # How long registration stays open
     tournament_duration_minutes: int = 120  # Estimated total tournament time
@@ -130,6 +132,12 @@ class TournamentAnalytics:
             "10000000000000000000",  # 10 MON
             "50000000000000000000",  # 50 MON
         ],
+        TournamentTier.HIGH_ROLLER: [
+            "100000000000000000000",  # 100 MON
+            "250000000000000000000",  # 250 MON
+            "500000000000000000000",  # 500 MON
+            "1000000000000000000000", # 1000 MON
+        ],
     }
 
     # Player counts by tier
@@ -138,7 +146,8 @@ class TournamentAnalytics:
         TournamentTier.SMALL: [4, 8, 16],
         TournamentTier.MEDIUM: [4, 8],
         TournamentTier.LARGE: [4, 8],
-        TournamentTier.WHALE: [4],
+        TournamentTier.WHALE: [4, 8],
+        TournamentTier.HIGH_ROLLER: [2, 4, 8],  # Smaller for ultra-high stakes
     }
 
     # Registration deadline (minutes) by tier
@@ -148,6 +157,7 @@ class TournamentAnalytics:
         TournamentTier.MEDIUM: [60, 90],
         TournamentTier.LARGE: [60, 120],
         TournamentTier.WHALE: [120, 180],
+        TournamentTier.HIGH_ROLLER: [180, 360],  # Longer for high stakes
     }
 
     # Peak hours (UTC) - typically evenings in major timezones
@@ -184,6 +194,13 @@ class TournamentAnalytics:
             "Titan's Arena #{n}",
             "Ultimate Showdown #{n}",
             "Legendary Battle #{n}",
+        ],
+        TournamentTier.HIGH_ROLLER: [
+            "High Roller Championship #{n}",
+            "Million Dollar Match #{n}",
+            "Elite Invitational #{n}",
+            "Grand Masters #{n}",
+            "Ultimate Stakes #{n}",
         ],
     }
 
@@ -281,8 +298,10 @@ class TournamentAnalytics:
             return TournamentTier.MEDIUM
         elif fee_wei < 10000000000000000000:  # < 10 MON
             return TournamentTier.LARGE
-        else:
+        elif fee_wei < 100000000000000000000:  # < 100 MON
             return TournamentTier.WHALE
+        else:
+            return TournamentTier.HIGH_ROLLER
 
     def _tier_up(self, tier: TournamentTier) -> TournamentTier:
         """Move to a higher tier"""
@@ -308,25 +327,53 @@ class TournamentAnalytics:
         max_players = min(analysis.recommended_players, game_rules.max_players)
         max_players = max(max_players, game_rules.min_players)
 
-        # Generate tournament name with game type prefix
+        # Select tournament mode - elimination for higher tiers or randomly
+        # Higher stakes = more likely to be elimination bracket
+        elimination_chance = {
+            TournamentTier.MICRO: 0.1,
+            TournamentTier.SMALL: 0.2,
+            TournamentTier.MEDIUM: 0.3,
+            TournamentTier.LARGE: 0.5,
+            TournamentTier.WHALE: 0.7,
+            TournamentTier.HIGH_ROLLER: 0.9,  # Almost always elimination for high stakes
+        }
+        is_elimination = random.random() < elimination_chance.get(tier, 0.3)
+
+        # Elimination requires power of 2 players
+        if is_elimination:
+            tournament_mode = TournamentMode.ELIMINATION
+            # Adjust to nearest power of 2
+            if max_players >= 8:
+                max_players = 8
+            elif max_players >= 4:
+                max_players = 4
+            else:
+                max_players = 2
+        else:
+            tournament_mode = TournamentMode.STANDARD
+
+        # Generate tournament name with game type and mode prefix
         game_prefixes = {
             GameType.CLAW: "Claw",
             GameType.PREDICTION: "Prediction",
             GameType.SPEED: "Speed",
             GameType.BLACKJACK: "Blackjack",
         }
+        mode_suffix = " Knockout" if tournament_mode == TournamentMode.ELIMINATION else ""
         name_template = random.choice(self.NAME_TEMPLATES[tier])
         base_name = name_template.format(n=self.tournament_counter)
-        name = f"{game_prefixes[game_type]} {base_name}"
+        name = f"{game_prefixes[game_type]} {base_name}{mode_suffix}"
         self.tournament_counter += 1
 
-        # Determine protocol fee (higher for larger tournaments)
-        if tier in [TournamentTier.WHALE, TournamentTier.LARGE]:
-            protocol_fee_bps = 200  # 2%
+        # Determine protocol fee (lower for higher tiers to attract big players)
+        if tier == TournamentTier.HIGH_ROLLER:
+            protocol_fee_bps = 100  # 1% for ultra-high stakes
+        elif tier in [TournamentTier.WHALE, TournamentTier.LARGE]:
+            protocol_fee_bps = 150  # 1.5%
         elif tier == TournamentTier.MEDIUM:
-            protocol_fee_bps = 250  # 2.5%
+            protocol_fee_bps = 200  # 2%
         else:
-            protocol_fee_bps = 300  # 3%
+            protocol_fee_bps = 250  # 2.5%
 
         # Registration deadline based on tier
         reg_options = self.TIER_REGISTRATION[tier]
@@ -340,6 +387,7 @@ class TournamentAnalytics:
         # Build reason string
         reasons = []
         reasons.append(f"game: {game_rules.name}")
+        reasons.append(f"mode: {tournament_mode.value}")
         if analysis.is_peak_hours:
             reasons.append("peak hours")
         if analysis.is_weekend:
@@ -357,6 +405,7 @@ class TournamentAnalytics:
             protocol_fee_bps=protocol_fee_bps,
             tier=tier,
             game_type=game_type,
+            tournament_mode=tournament_mode,
             reason=", ".join(reasons),
             registration_deadline_minutes=reg_deadline,
             tournament_duration_minutes=tournament_duration,
@@ -533,6 +582,7 @@ class AutonomousAgent:
         logger.info(f"Creating Tournament:")
         logger.info(f"   Name: {config.name}")
         logger.info(f"   Game: {game_rules.name}")
+        logger.info(f"   Mode: {config.tournament_mode.value}")
         logger.info(f"   Entry Fee: {int(config.entry_fee_wei) / 1e18:.4f} MON")
         logger.info(f"   Max Players: {config.max_players}")
         logger.info(f"   Tier: {config.tier.value}")
@@ -579,6 +629,7 @@ class AutonomousAgent:
                     "protocol_fee_bps": config.protocol_fee_bps,
                     "contract_address": contract_address,
                     "game_type": config.game_type.value,
+                    "tournament_mode": config.tournament_mode.value,
                     "game_config": {
                         "type": config.game_type.value,
                         "name": game_rules.name,
@@ -586,6 +637,7 @@ class AutonomousAgent:
                         "how_to_play": game_rules.how_to_play,
                         "tips": game_rules.tips,
                         "duration_seconds": game_rules.duration_seconds,
+                        "tournament_mode": config.tournament_mode.value,
                     },
                     "learning_phase_seconds": config.learning_phase_seconds,
                 }

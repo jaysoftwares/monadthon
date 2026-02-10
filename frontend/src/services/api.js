@@ -6,6 +6,43 @@ const API = `${BACKEND_URL}/api`;
 // Admin API key - in production, this should be handled securely
 const ADMIN_API_KEY = 'claw-arena-admin-key';
 
+// Network configuration
+const NETWORK_CONFIG = {
+  testnet: {
+    chainId: 10143,
+    name: 'Monad Testnet',
+    explorerUrl: 'https://testnet.monadexplorer.com',
+  },
+  mainnet: {
+    chainId: 143,
+    name: 'Monad',
+    explorerUrl: 'https://monadscan.com',
+  },
+};
+
+// Current network - can be updated by the app
+let currentNetwork = 'testnet';
+
+// Set the current network
+export const setNetwork = (network) => {
+  if (NETWORK_CONFIG[network]) {
+    currentNetwork = network;
+  }
+};
+
+// Get current network
+export const getNetwork = () => currentNetwork;
+
+// Get network config
+export const getNetworkConfig = () => NETWORK_CONFIG[currentNetwork];
+
+// Get network from chain ID
+export const getNetworkFromChainId = (chainId) => {
+  if (chainId === NETWORK_CONFIG.testnet.chainId) return 'testnet';
+  if (chainId === NETWORK_CONFIG.mainnet.chainId) return 'mainnet';
+  return null;
+};
+
 const apiClient = axios.create({
   baseURL: API,
   headers: {
@@ -22,34 +59,45 @@ const adminClient = axios.create({
   },
 });
 
+// Add network param to requests
+const withNetwork = (params = {}) => ({
+  ...params,
+  network: currentNetwork,
+});
+
 // Public endpoints
 export const getHealth = async () => {
   const response = await apiClient.get('/health');
   return response.data;
 };
 
+export const getConfig = async () => {
+  const response = await apiClient.get('/config', { params: withNetwork() });
+  return response.data;
+};
+
 export const getArenas = async () => {
-  const response = await apiClient.get('/arenas');
+  const response = await apiClient.get('/arenas', { params: withNetwork() });
   return response.data;
 };
 
 export const getArena = async (address) => {
-  const response = await apiClient.get(`/arenas/${address}`);
+  const response = await apiClient.get(`/arenas/${address}`, { params: withNetwork() });
   return response.data;
 };
 
 export const getArenaPlayers = async (address) => {
-  const response = await apiClient.get(`/arenas/${address}/players`);
+  const response = await apiClient.get(`/arenas/${address}/players`, { params: withNetwork() });
   return response.data;
 };
 
 export const getArenaPayouts = async (address) => {
-  const response = await apiClient.get(`/arenas/${address}/payouts`);
+  const response = await apiClient.get(`/arenas/${address}/payouts`, { params: withNetwork() });
   return response.data;
 };
 
 export const getLeaderboard = async (limit = 50) => {
-  const response = await apiClient.get(`/leaderboard?limit=${limit}`);
+  const response = await apiClient.get('/leaderboard', { params: withNetwork({ limit }) });
   return response.data;
 };
 
@@ -59,18 +107,23 @@ export const joinArena = async (arenaAddress, playerAddress, txHash) => {
     arena_address: arenaAddress,
     player_address: playerAddress,
     tx_hash: txHash,
+    network: currentNetwork,
   });
   return response.data;
 };
 
 // Admin endpoints
 export const createArena = async (arenaData) => {
-  const response = await adminClient.post('/admin/arena/create', arenaData);
+  const response = await adminClient.post('/admin/arena/create', arenaData, {
+    params: withNetwork(),
+  });
   return response.data;
 };
 
 export const closeArena = async (address) => {
-  const response = await adminClient.post(`/admin/arena/${address}/close`);
+  const response = await adminClient.post(`/admin/arena/${address}/close`, null, {
+    params: withNetwork(),
+  });
   return response.data;
 };
 
@@ -79,29 +132,30 @@ export const requestFinalizeSignature = async (arenaAddress, winners, amounts) =
     arena_address: arenaAddress,
     winners,
     amounts,
+    network: currentNetwork,
   });
   return response.data;
 };
 
 export const recordFinalize = async (address, txHash, winners, amounts) => {
   const response = await adminClient.post(`/admin/arena/${address}/finalize`, null, {
-    params: {
+    params: withNetwork({
       tx_hash: txHash,
       winners: winners.join(','),
       amounts: amounts.join(','),
-    },
+    }),
   });
   return response.data;
 };
 
 // Agent endpoints
 export const getAgentStatus = async () => {
-  const response = await apiClient.get('/agent/status');
+  const response = await apiClient.get('/agent/status', { params: withNetwork() });
   return response.data;
 };
 
 export const getAgentSchedule = async () => {
-  const response = await apiClient.get('/agent/schedule');
+  const response = await apiClient.get('/agent/schedule', { params: withNetwork() });
   return response.data;
 };
 
@@ -119,7 +173,8 @@ export const parseMON = (monString) => {
 };
 
 export const getExplorerUrl = (type, hash) => {
-  const baseUrl = process.env.REACT_APP_EXPLORER_BASE_URL || 'https://testnet.monadexplorer.com';
+  const config = getNetworkConfig();
+  const baseUrl = config.explorerUrl;
   switch (type) {
     case 'tx':
       return `${baseUrl}/tx/${hash}`;

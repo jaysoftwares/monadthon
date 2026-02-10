@@ -68,8 +68,15 @@ const NetworkSwitcher = () => {
       return;
     }
 
-    await switchNetwork(networkId);
-    setIsOpen(false);
+    try {
+      await switchNetwork(networkId);
+    } catch (error) {
+      // Silently handle user rejection or other errors
+      // The WalletContext already logs non-rejection errors
+      console.debug('Network switch cancelled or failed:', error?.message || error);
+    } finally {
+      setIsOpen(false);
+    }
   };
 
   return (
