@@ -8,9 +8,10 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Literal, Dict, Any
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
 import httpx
+import asyncio
 
 from game_engine import (
     GameType, GameEngine, GameState, GAME_RULES,
@@ -73,6 +74,200 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# ===========================================
+# ARENA TIMER MANAGEMENT
+# ===========================================
+
+class ArenaTimerManager:
+    """Manages game start countdowns and idle timers for arenas"""
+    
+    def __init__(self):
+        self.arena_timers: Dict[str, Dict[str, Any]] = {}  # arena_address -> {timer_type, countdown_ends_at, ...}
+        self.background_task = None
+    
+    async def start_game_countdown(self, arena_address: str, countdown_seconds: int = 10):
+        """Start a countdown timer before game begins"""
+        countdown_ends_at = (datetime.now(timezone.utc) + timedelta(seconds=countdown_seconds)).isoformat()
+        
+        self.arena_timers[arena_address] = {
+            "type": "game_start_countdown",
+            "countdown_starts": datetime.now(timezone.utc).isoformat(),
+            "countdown_ends_at": countdown_ends_at,
+            "countdown_seconds": countdown_seconds,
+            "game_started": False
+        }
+        
+        logger.info(f"Started game countdown for arena {arena_address}, ends in {countdown_seconds}s")
+    
+    async def start_idle_timer(self, arena_address: str, idle_seconds: int = 20):
+        """Start an idle timer for arenas with 0 or 1 player"""
+        idle_ends_at = (datetime.now(timezone.utc) + timedelta(seconds=idle_seconds)).isoformat()
+        
+        self.arena_timers[arena_address] = {
+            "type": "idle_timer",
+            "idle_starts": datetime.now(timezone.utc).isoformat(),
+            "idle_ends_at": idle_ends_at,
+            "idle_seconds": idle_seconds
+        }
+        
+        logger.info(f"Started idle timer for arena {arena_address}, expires in {idle_seconds}s")
+    
+    async def cancel_timer(self, arena_address: str):
+        """Cancel any timer for an arena"""
+        if arena_address in self.arena_timers:
+            del self.arena_timers[arena_address]
+            logger.info(f"Cancelled timer for arena {arena_address}")
+    
+    async def get_timer_status(self, arena_address: str) -> Optional[Dict[str, Any]]:
+        """Get current timer status for an arena"""
+        return self.arena_timers.get(arena_address)
+    
+    async def process_timers(self):
+        """Background task to process expiring timers"""
+        while True:
+            try:
+                await asyncio.sleep(1)  # Check every second
+                now = datetime.now(timezone.utc)
+                
+                expired_arenas = []
+                
+                for arena_address, timer in list(self.arena_timers.items()):
+                    try:
+                        if timer["type"] == "game_start_countdown":
+                            countdown_ends = datetime.fromisoformat(timer["countdown_ends_at"].replace("Z", "+00:00"))
+                            if now >= countdown_ends and not timer.get("game_started"):
+                                # Countdown expired, start the game
+                                await self._trigger_game_start(arena_address)
+                                timer["game_started"] = True
+                                expired_arenas.append(arena_address)
+                        
+                        elif timer["type"] == "idle_timer":
+                            idle_ends = datetime.fromisoformat(timer["idle_ends_at"].replace("Z", "+00:00"))
+                            if now >= idle_ends:
+                                # Idle timer expired, handle based on player count
+                                await self._handle_idle_expiration(arena_address)
+                                expired_arenas.append(arena_address)
+                    except Exception as e:
+                        logger.error(f"Error processing timer for arena {arena_address}: {e}")
+                
+                # Clean up expired timers
+                for arena_address in expired_arenas:
+                    await self.cancel_timer(arena_address)
+            
+            except Exception as e:
+                logger.error(f"Error in timer processing loop: {e}")
+                await asyncio.sleep(5)  # Delay before retrying
+    
+    async def _trigger_game_start(self, arena_address: str):
+        """Trigger game start after countdown expires"""
+        try:
+            arena = await db.arenas.find_one({"address": arena_address})
+            if not arena:
+                logger.warning(f"Arena {arena_address} not found for game start")
+                return
+            
+            players = arena.get("players", [])
+            if len(players) < 2:
+                logger.warning(f"Arena {arena_address} has less than 2 players, cannot start game")
+                return
+            
+            game_type_str = arena.get("game_type", "prediction")
+            try:
+                game_type = GameType(game_type_str)
+            except ValueError:
+                game_type = GameType.PREDICTION
+            
+            # Create and start game
+            game = game_engine.create_game(
+                arena_address=arena_address,
+                game_type=game_type,
+                players=players
+            )
+            
+            # Start the game (moves from learning to active)
+            game_engine.start_game(game.game_id)
+            
+            # Update arena
+            await db.arenas.update_one(
+                {"address": arena_address},
+                {"$set": {
+                    "game_id": game.game_id,
+                    "game_status": "active",
+                    "game_start": datetime.now(timezone.utc).isoformat()
+                }}
+            )
+            
+            logger.info(f"Game started for arena {arena_address}, game_id: {game.game_id}")
+        
+        except Exception as e:
+            logger.error(f"Error triggering game start for arena {arena_address}: {e}")
+    
+    async def _handle_idle_expiration(self, arena_address: str):
+        """Handle idle timer expiration based on player count"""
+        try:
+            arena = await db.arenas.find_one({"address": arena_address})
+            if not arena:
+                logger.warning(f"Arena {arena_address} not found for idle handling")
+                return
+            
+            players = arena.get("players", [])
+            player_count = len(players)
+            
+            if player_count == 0:
+                # Delete empty arena
+                await db.arenas.delete_one({"address": arena_address})
+                logger.info(f"Deleted empty arena {arena_address}")
+            
+            elif player_count == 1:
+                # Delete arena and refund the player
+                player_address = players[0]
+                entry_fee = arena.get("entry_fee", "0")
+                
+                # Record refund (in production, trigger actual refund tx)
+                refund_record = {
+                    "arena_address": arena_address,
+                    "player_address": player_address,
+                    "amount": entry_fee,
+                    "reason": "idle_timeout_single_player",
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                }
+                await db.refunds.insert_one(refund_record)
+                
+                await db.arenas.delete_one({"address": arena_address})
+                logger.info(f"Deleted arena {arena_address} with 1 player, refunded {player_address}")
+            
+            elif player_count >= 2:
+                # Start game immediately
+                game_type_str = arena.get("game_type", "prediction")
+                try:
+                    game_type = GameType(game_type_str)
+                except ValueError:
+                    game_type = GameType.PREDICTION
+                
+                game = game_engine.create_game(
+                    arena_address=arena_address,
+                    game_type=game_type,
+                    players=players
+                )
+                
+                game_engine.start_game(game.game_id)
+                
+                await db.arenas.update_one(
+                    {"address": arena_address},
+                    {"$set": {
+                        "game_id": game.game_id,
+                        "game_status": "active",
+                        "game_start": datetime.now(timezone.utc).isoformat()
+                    }}
+                )
+                
+                logger.info(f"Started game immediately for arena {arena_address} after idle timeout")
+        
+        except Exception as e:
+            logger.error(f"Error handling idle expiration for arena {arena_address}: {e}")
+
+timer_manager = ArenaTimerManager()
 
 # ===========================================
 # MODELS
@@ -605,8 +800,37 @@ async def join_arena(join_data: JoinArena):
     )
 
     logger.info(f"Player {join_data.player_address} joined arena {join_data.arena_address}")
+    
+    # Check if arena is now full and start countdown if so
+    updated_arena = await db.arenas.find_one({"address": join_data.arena_address})
+    players = updated_arena.get("players", [])
+    max_players = updated_arena.get("max_players", 8)
+    
+    response = {"success": True, "message": "Player joined arena", "tx_hash": join_data.tx_hash}
+    
+    if len(players) >= max_players and not updated_arena.get("is_closed"):
+        # Arena is now full, close it and start countdown
+        await db.arenas.update_one(
+            {"address": join_data.arena_address},
+            {"$set": {"is_closed": True, "closed_at": datetime.now(timezone.utc).isoformat()}}
+        )
+        
+        await timer_manager.start_game_countdown(join_data.arena_address, countdown_seconds=10)
+        
+        response["arena_full"] = True
+        response["countdown_starts"] = True
+        response["countdown_seconds"] = 10
+        logger.info(f"Arena {join_data.arena_address} is now full, starting game countdown")
+    
+    # Check if we should start idle timer
+    elif len(players) <= 1 and not updated_arena.get("is_closed"):
+        # Start idle timer for empty/1-player arena
+        await timer_manager.start_idle_timer(join_data.arena_address, idle_seconds=20)
+        response["idle_timer_started"] = True
+        response["idle_seconds"] = 20
+        logger.info(f"Arena {join_data.arena_address} has {len(players)} player(s), idle timer started")
 
-    return {"success": True, "message": "Player joined arena", "tx_hash": join_data.tx_hash}
+    return response
 
 # ===========================================
 # ADMIN ENDPOINTS
@@ -801,6 +1025,236 @@ async def record_finalize(
     logger.info(f"Finalized arena {address} with tx {tx_hash}")
 
     return {"success": True, "message": "Arena finalized", "tx_hash": tx_hash}
+
+@api_router.get("/admin/arena/{address}/check-game-status")
+async def check_game_status(address: str, _: bool = Depends(verify_admin_key)):
+    """
+    Check the current game status for an arena.
+    Returns the game state including timer status and game progress.
+    """
+    arena = await db.arenas.find_one({"address": address}, {"_id": 0})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+    
+    game_id = arena.get("game_id")
+    game_status = arena.get("game_status", "waiting")
+    players = arena.get("players", [])
+    
+    response = {
+        "arena_address": address,
+        "arena_name": arena.get("name"),
+        "status": "closed" if arena.get("is_closed") else "open",
+        "is_finalized": arena.get("is_finalized", False),
+        "player_count": len(players),
+        "max_players": arena.get("max_players"),
+        "players": players,
+        "game_status": game_status,
+        "game_id": game_id,
+    }
+    
+    # Add timer info if exists
+    timer_status = await timer_manager.get_timer_status(address)
+    if timer_status:
+        response["timer"] = timer_status
+        
+        # Calculate time remaining
+        if timer_status["type"] == "game_start_countdown":
+            ends_at = datetime.fromisoformat(timer_status["countdown_ends_at"].replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            response["time_remaining_seconds"] = max(0, int((ends_at - now).total_seconds()))
+        elif timer_status["type"] == "idle_timer":
+            ends_at = datetime.fromisoformat(timer_status["idle_ends_at"].replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            response["time_remaining_seconds"] = max(0, int((ends_at - now).total_seconds()))
+    
+    # Add game state if active game exists
+    if game_id and game_id in game_engine.active_games:
+        game = game_engine.active_games[game_id]
+        leaderboard = game_engine.get_leaderboard(game_id)
+        response["game"] = {
+            "id": game_id,
+            "type": game.game_type.value,
+            "status": game.status,
+            "round": game.round_number,
+            "leaderboard": leaderboard
+        }
+    
+    return response
+
+@api_router.post("/admin/arena/{address}/process-winners")
+async def process_winners(
+    address: str,
+    _: bool = Depends(verify_admin_key)
+):
+    """
+    Process winners from completed game and calculate payouts.
+    This endpoint:
+    1. Gets game results from the game engine
+    2. Calculates payouts based on entry fees and protocol fees
+    3. Stores winners and payouts in the arena
+    """
+    arena = await db.arenas.find_one({"address": address})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+    
+    if arena.get("is_finalized"):
+        raise HTTPException(status_code=400, detail="Arena is already finalized")
+    
+    game_id = arena.get("game_id")
+    if not game_id or game_id not in game_engine.active_games:
+        raise HTTPException(status_code=400, detail="No active game session")
+    
+    game = game_engine.active_games[game_id]
+    
+    if game.status != "finished":
+        raise HTTPException(status_code=400, detail=f"Game is {game.status}, not finished")
+    
+    # Get winners from game
+    winners = game.winners if game.winners else []
+    if not winners:
+        raise HTTPException(status_code=400, detail="No winners determined by game engine")
+    
+    # Calculate payouts
+    entry_fee = int(arena.get("entry_fee", "0"))
+    protocol_fee_bps = int(arena.get("protocol_fee_bps", 250))  # 2.5% default
+    players = arena.get("players", [])
+    player_count = len(players)
+    
+    # Total pool = entry_fee * number of players
+    total_pool = entry_fee * player_count
+    
+    # Calculate protocol fee
+    protocol_fee = int(total_pool * protocol_fee_bps / 10000)
+    
+    # Available for distribution to winners
+    available_for_winners = total_pool - protocol_fee
+    
+    # Distribute evenly among winners
+    payout_per_winner = available_for_winners // len(winners) if winners else 0
+    remainder = available_for_winners % len(winners) if winners else 0
+    
+    # Build payouts list (add remainder to first winner)
+    payouts = []
+    payout_amounts = []
+    for i, winner in enumerate(winners):
+        amount = payout_per_winner
+        if i == 0:
+            amount += remainder
+        payouts.append(winner)
+        payout_amounts.append(str(amount))
+    
+    # Store winners and payouts
+    await db.arenas.update_one(
+        {"address": address},
+        {"$set": {
+            "winners": payouts,
+            "payouts": payout_amounts,
+            "game_results": {
+                "winners": game.winners,
+                "player_scores": {p.address: p.score for p in game.players.values()},
+                "total_pool": str(total_pool),
+                "protocol_fee": str(protocol_fee),
+                "payout_per_winner": str(payout_per_winner)
+            }
+        }}
+    )
+    
+    # Record individual payout records
+    for winner, amount in zip(payouts, payout_amounts):
+        payout = PayoutRecord(
+            arena_address=address,
+            winner_address=winner,
+            amount=amount,
+            tx_hash=""  # Will be set when finalized on-chain
+        )
+        await db.payouts.insert_one(payout.model_dump())
+    
+    logger.info(f"Processed winners for arena {address}: {payouts}")
+    
+    return {
+        "success": True,
+        "arena_address": address,
+        "winners": payouts,
+        "payouts": payout_amounts,
+        "total_pool": str(total_pool),
+        "protocol_fee": str(protocol_fee),
+        "payout_per_winner": str(payout_per_winner),
+        "message": "Winners processed successfully"
+    }
+
+@api_router.post("/admin/arena/{address}/check-if-full")
+async def check_if_full(address: str, _: bool = Depends(verify_admin_key)):
+    """
+    Check if arena is full and trigger game start countdown if so.
+    Returns True if full and countdown started, False otherwise.
+    """
+    arena = await db.arenas.find_one({"address": address})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+    
+    players = arena.get("players", [])
+    max_players = arena.get("max_players", 8)
+    
+    is_full = len(players) >= max_players
+    
+    if is_full and not arena.get("is_closed"):
+        # Close arena and start countdown
+        await db.arenas.update_one(
+            {"address": address},
+            {"$set": {"is_closed": True, "closed_at": datetime.now(timezone.utc).isoformat()}}
+        )
+        
+        # Start the countdown
+        await timer_manager.start_game_countdown(address, countdown_seconds=10)
+        
+        logger.info(f"Arena {address} is full, starting 10-second countdown")
+        
+        return {
+            "success": True,
+            "is_full": True,
+            "player_count": len(players),
+            "max_players": max_players,
+            "countdown_started": True,
+            "countdown_seconds": 10,
+            "message": "Arena is full, game will start in 10 seconds"
+        }
+    
+    return {
+        "success": True,
+        "is_full": is_full,
+        "player_count": len(players),
+        "max_players": max_players,
+        "countdown_started": False,
+        "message": f"Arena has {len(players)}/{max_players} players"
+    }
+
+@api_router.post("/admin/arena/{address}/start-idle-timer")
+async def start_idle_timer(address: str, _: bool = Depends(verify_admin_key)):
+    """
+    Start idle timer for an arena with 0 or 1 player.
+    If arena is still empty/1-player after 20 seconds, it will be deleted.
+    """
+    arena = await db.arenas.find_one({"address": address})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+    
+    players = arena.get("players", [])
+    
+    if len(players) > 1:
+        return {
+            "success": False,
+            "message": f"Arena has {len(players)} players, idle timer not needed"
+        }
+    
+    await timer_manager.start_idle_timer(address, idle_seconds=20)
+    
+    return {
+        "success": True,
+        "arena_address": address,
+        "player_count": len(players),
+        "idle_seconds": 20,
+        "message": "Idle timer started, arena will be deleted if still empty/1-player after 20 seconds"
+    }
 
 # ===========================================
 # GAME ENDPOINTS
@@ -1470,11 +1924,24 @@ async def startup_event():
     user_agent_manager.db = db
     await user_agent_manager.start()
     logger.info("User Agent Manager initialized")
+    
+    # Start timer manager background task
+    timer_manager.background_task = asyncio.create_task(timer_manager.process_timers())
+    logger.info("Arena Timer Manager started")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
     # Stop user agent manager
     await user_agent_manager.stop()
     logger.info("User Agent Manager stopped")
+    
+    # Cancel timer manager task
+    if timer_manager.background_task:
+        timer_manager.background_task.cancel()
+        try:
+            await timer_manager.background_task
+        except asyncio.CancelledError:
+            pass
+    logger.info("Arena Timer Manager stopped")
 
     client.close()

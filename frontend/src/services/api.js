@@ -148,6 +148,76 @@ export const recordFinalize = async (address, txHash, winners, amounts) => {
   return response.data;
 };
 
+// Game endpoints
+export const getGameRules = async (gameType) => {
+  const response = await apiClient.get(`/games/rules/${gameType}`);
+  return response.data;
+};
+
+export const getGameTypes = async () => {
+  const response = await apiClient.get('/games/types');
+  return response.data;
+};
+
+export const getGameState = async (arenaAddress) => {
+  const response = await apiClient.get(`/arenas/${arenaAddress}/game`);
+  return response.data;
+};
+
+export const getGameLeaderboard = async (arenaAddress) => {
+  const response = await apiClient.get(`/arenas/${arenaAddress}/game/leaderboard`);
+  return response.data;
+};
+
+export const submitGameMove = async (arenaAddress, move) => {
+  const response = await apiClient.post(`/arenas/${arenaAddress}/game/move`, {
+    arena_address: arenaAddress,
+    move_data: move,
+  });
+  return response.data;
+};
+
+// Admin game endpoints
+export const startArenaGame = async (address) => {
+  const response = await adminClient.post(`/admin/arenas/${address}/game/start`, null);
+  return response.data;
+};
+
+export const activateArenaGame = async (address) => {
+  const response = await adminClient.post(`/admin/arenas/${address}/game/activate`, null);
+  return response.data;
+};
+
+export const advanceGameRound = async (address) => {
+  const response = await adminClient.post(`/admin/arenas/${address}/game/advance-round`, null);
+  return response.data;
+};
+
+export const finishArenaGame = async (address) => {
+  const response = await adminClient.post(`/admin/arenas/${address}/game/finish`, null);
+  return response.data;
+};
+
+export const checkGameStatus = async (address) => {
+  const response = await adminClient.get(`/admin/arena/${address}/check-game-status`);
+  return response.data;
+};
+
+export const processWinners = async (address) => {
+  const response = await adminClient.post(`/admin/arena/${address}/process-winners`, null);
+  return response.data;
+};
+
+export const checkIfFull = async (address) => {
+  const response = await adminClient.post(`/admin/arena/${address}/check-if-full`, null);
+  return response.data;
+};
+
+export const startIdleTimer = async (address) => {
+  const response = await adminClient.post(`/admin/arena/${address}/start-idle-timer`, null);
+  return response.data;
+};
+
 // Agent endpoints
 export const getAgentStatus = async () => {
   const response = await apiClient.get('/agent/status', { params: withNetwork() });

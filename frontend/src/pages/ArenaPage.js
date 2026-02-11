@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { getArena, joinArena, formatMON, getExplorerUrl } from '../services/api';
+import { getArena, joinArena, formatMON, getExplorerUrl, getGameState, getGameRules } from '../services/api';
 import { useWallet } from '../context/WalletContext';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -8,7 +8,7 @@ import { Skeleton } from '../components/ui/skeleton';
 import CountdownTimer from '../components/CountdownTimer';
 import {
   ArrowLeft, Users, Coins, Trophy, Clock, ExternalLink,
-  CheckCircle, XCircle, Loader2, Copy, Check, Bot, Timer, Globe, AlertTriangle
+  CheckCircle, XCircle, Loader2, Copy, Check, Bot, Timer, Globe, AlertTriangle, Zap
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -19,12 +19,38 @@ const ArenaPage = () => {
   const [loading, setLoading] = useState(true);
   const [joining, setJoining] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [gameState, setGameState] = useState(null);
+  const [gameRules, setGameRules] = useState(null);
+  const [showHowToPlay, setShowHowToPlay] = useState(false);
+  const [gameCountdown, setGameCountdown] = useState(null);
+  const [gameStartTime, setGameStartTime] = useState(null);
 
+  // Fetch arena and game state
   useEffect(() => {
-    const fetchArena = async () => {
+    const fetchData = async () => {
       try {
         const data = await getArena(address);
         setArena(data);
+
+        // If game is active, fetch game state and rules
+        if (data.game_id && (data.game_status === 'active' || data.game_status === 'learning')) {
+          try {
+            const gs = await getGameState(address);
+            setGameState(gs);
+
+            // Fetch game rules if we don't have them
+            if (data.game_type && !gameRules) {
+              try {
+                const rules = await getGameRules(data.game_type);
+                setGameRules(rules);
+              } catch (e) {
+                console.error('Failed to fetch game rules:', e);
+              }
+            }
+          } catch (e) {
+            console.error('Failed to fetch game state:', e);
+          }
+        }
       } catch (error) {
         console.error('Failed to fetch arena:', error);
         toast.error('Failed to load arena');
@@ -33,10 +59,37 @@ const ArenaPage = () => {
       }
     };
 
-    fetchArena();
-    const interval = setInterval(fetchArena, 10000); // Refresh every 10s
+    fetchData();
+    // Refresh more frequently when game is active or countdown is running
+    const interval = setInterval(fetchData, 2000); // Refresh every 2s
     return () => clearInterval(interval);
-  }, [address]);
+  }, [address, gameRules]);
+
+  // Handle game countdown
+  useEffect(() => {
+    if (!arena?.is_closed || arena?.game_status !== 'waiting') {
+      return;
+    }
+
+    // Calculate time until game starts (10 seconds after arena closes)
+    const closedTime = new Date(arena.closed_at);
+    const gameStartEstimate = new Date(closedTime.getTime() + 10000); // 10 seconds
+    
+    const updateCountdown = () => {
+      const now = new Date();
+      const remaining = Math.max(0, Math.floor((gameStartEstimate - now) / 1000));
+      setGameCountdown(remaining);
+
+      if (remaining === 0) {
+        // Game should be starting
+        setShowHowToPlay(true);
+      }
+    };
+
+    updateCountdown();
+    const timer = setInterval(updateCountdown, 100);
+    return () => clearInterval(timer);
+  }, [arena?.is_closed, arena?.game_status, arena?.closed_at]);
 
   const handleJoin = async () => {
     if (!isConnected) {
@@ -191,8 +244,126 @@ const ArenaPage = () => {
         </div>
       )}
 
+      {/* How to Play Modal */}
+      {showHowToPlay && gameRules && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-xl">
+            <div className="sticky top-0 p-6 border-b border-gray-100 bg-gradient-to-r from-purple-50 to-white flex items-center justify-between">
+              <h2 className="font-heading text-2xl font-bold text-gray-900">How to Play</h2>
+              <button
+                onClick={() => setShowHowToPlay(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                ✕
+              </button>
+            </div>
+            
+            <div className="p-6">
+              <div className="mb-6">
+                <h3 className="font-heading text-xl font-bold text-gray-900 mb-2">{gameRules.name}</h3>
+                <p className="text-gray-600 mb-4">{gameRules.description}</p>
+                <Badge className="mb-4">
+                  {gameRules.duration_seconds} seconds • {gameRules.min_players}-{gameRules.max_players} players
+                </Badge>
+              </div>
+
+              <div className="mb-6">
+                <h4 className="font-heading text-lg font-semibold text-gray-900 mb-3">How to Play</h4>
+                <ol className="list-decimal list-inside space-y-2">
+                  {gameRules.how_to_play.map((step, idx) => (
+                    <li key={idx} className="text-gray-700">{step}</li>
+                  ))}
+                </ol>
+              </div>
+
+              <div className="mb-6">
+                <h4 className="font-heading text-lg font-semibold text-gray-900 mb-3">Tips & Tricks</h4>
+                <ul className="list-disc list-inside space-y-2">
+                  {gameRules.tips.map((tip, idx) => (
+                    <li key={idx} className="text-gray-700">{tip}</li>
+                  ))}
+                </ul>
+              </div>
+
+              <Button
+                onClick={() => setShowHowToPlay(false)}
+                className="btn-primary w-full"
+              >
+                Got It! Let's Play
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Content */}
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Game Countdown Banner */}
+        {arena?.is_closed && gameCountdown !== null && gameCountdown > 0 && arena?.game_status === 'waiting' && (
+          <div className="mb-8 bg-gradient-to-r from-purple-500 to-purple-600 rounded-2xl p-6 text-white shadow-lg">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-purple-100 text-sm font-semibold">GAME STARTING IN</p>
+                <p className="font-heading text-4xl font-bold">{gameCountdown}s</p>
+              </div>
+              <div className="text-right">
+                <Zap className="w-12 h-12 inline-block mb-2" />
+                <p className="text-purple-100 text-sm">Get ready!</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Game Active Display */}
+        {arena?.game_status === 'active' && gameState && (
+          <div className="mb-8 bg-white rounded-2xl border-2 border-green-400 shadow-lg overflow-hidden">
+            <div className="p-6 bg-gradient-to-r from-green-50 to-emerald-50 border-b border-green-200">
+              <h3 className="font-heading text-2xl font-bold text-gray-900 flex items-center gap-2">
+                <Zap className="w-6 h-6 text-green-600" />
+                Game in Progress
+              </h3>
+              <p className="text-gray-600 mt-1">
+                Round {gameState.round_number} • {gameState.time_remaining_seconds}s remaining
+              </p>
+            </div>
+            
+            {gameState.leaderboard && gameState.leaderboard.length > 0 && (
+              <div className="p-6">
+                <h4 className="font-heading font-semibold text-gray-900 mb-4">Current Scores</h4>
+                <div className="space-y-3">
+                  {gameState.leaderboard.slice(0, 5).map((player, idx) => (
+                    <div key={player.address} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div className="flex items-center gap-3">
+                        <div className="font-heading font-bold text-lg text-gray-600 w-6">{idx + 1}</div>
+                        <div>
+                          <p className="font-mono text-sm text-gray-900">{player.address}</p>
+                          {player.address === walletAddress && (
+                            <span className="text-xs text-[#836EF9] font-medium">You</span>
+                          )}
+                        </div>
+                      </div>
+                      <span className="font-heading font-bold text-gray-900">{player.score}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Game Finished Display */}
+        {arena?.game_status === 'finished' && (
+          <div className="mb-8 bg-white rounded-2xl border-2 border-blue-400 shadow-lg overflow-hidden">
+            <div className="p-6 bg-gradient-to-r from-blue-50 to-cyan-50 border-b border-blue-200">
+              <h3 className="font-heading text-2xl font-bold text-gray-900 flex items-center gap-2">
+                <CheckCircle className="w-6 h-6 text-blue-600" />
+                Game Complete
+              </h3>
+              <p className="text-gray-600 mt-1">Waiting for winner processing...</p>
+            </div>
+          </div>
+        )}
+
         {/* Stats Grid */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-card">
