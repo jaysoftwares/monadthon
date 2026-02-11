@@ -4,6 +4,7 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import random
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Literal, Dict, Any
@@ -160,7 +161,7 @@ class ArenaTimerManager:
                 await asyncio.sleep(5)  # Delay before retrying
     
     async def _trigger_game_start(self, arena_address: str):
-        """Trigger game start after countdown expires"""
+        """Trigger game start after countdown expires and automatically play through all rounds"""
         try:
             arena = await db.arenas.find_one({"address": arena_address})
             if not arena:
@@ -185,23 +186,257 @@ class ArenaTimerManager:
                 players=players
             )
             
-            # Start the game (moves from learning to active)
-            game_engine.start_game(game.game_id)
+            game_id = game.game_id
             
-            # Update arena
+            # Start the game (moves from learning to active)
+            game_engine.start_game(game_id)
+            
+            # Update arena with game_id and active status
             await db.arenas.update_one(
                 {"address": arena_address},
                 {"$set": {
-                    "game_id": game.game_id,
+                    "game_id": game_id,
                     "game_status": "active",
                     "game_start": datetime.now(timezone.utc).isoformat()
                 }}
             )
             
-            logger.info(f"Game started for arena {arena_address}, game_id: {game.game_id}")
-        
+            logger.info(f"Game started for arena {arena_address}, game_id: {game_id}")
+            
+            # Automatically play through all game rounds
+            await self._play_game_to_completion(arena_address, game_id)
+            
         except Exception as e:
             logger.error(f"Error triggering game start for arena {arena_address}: {e}")
+    
+    async def _play_game_to_completion(self, arena_address: str, game_id: str):
+        """
+        Automatically play through all game rounds and determine winners.
+        This runs the game to completion, then processes winners and payouts.
+        """
+        try:
+            if game_id not in game_engine.active_games:
+                logger.error(f"Game {game_id} not found in active games")
+                return
+            
+            game = game_engine.active_games[game_id]
+            rules = GAME_RULES[game.game_type]
+            
+            # Determine max rounds based on game type
+            max_rounds = {
+                GameType.CLAW: 1,
+                GameType.PREDICTION: 3,
+                GameType.SPEED: 10,
+                GameType.BLACKJACK: 5,
+            }
+            
+            max_round = max_rounds.get(game.game_type, 3)
+            
+            # Simulate automatic moves for players (since no frontend interaction)
+            # Players get automatic moves based on game type
+            logger.info(f"Starting automatic game play for {game_id}, max rounds: {max_round}")
+            
+            while game.round_number <= max_round and game.status == "active":
+                logger.info(f"Game {game_id} - Round {game.round_number}/{max_round}")
+                
+                # Generate moves for each player
+                for addr in game.players.keys():
+                    if game.players[addr].is_eliminated:
+                        continue
+                    
+                    # Generate automatic move based on game type
+                    auto_move = self._generate_auto_move(game, addr)
+                    
+                    if auto_move:
+                        success, msg, result = game_engine.submit_move(
+                            game_id=game_id,
+                            player_address=addr,
+                            move=auto_move
+                        )
+                        logger.debug(f"Player {addr} move: {msg}")
+                
+                # Advance to next round (or finish if at max)
+                if game.round_number >= max_round:
+                    game_engine.finish_game(game_id)
+                    logger.info(f"Game {game_id} finished after round {game.round_number}")
+                    break
+                else:
+                    game_engine.advance_round(game_id)
+                    logger.info(f"Game {game_id} advanced to round {game.round_number}")
+                
+                # Small delay between rounds
+                await asyncio.sleep(0.1)
+            
+            # Game is now finished, extract winners and calculate payouts
+            await self._process_game_winners(arena_address, game_id)
+            
+        except Exception as e:
+            logger.error(f"Error playing game to completion for {game_id}: {e}")
+    
+    def _generate_auto_move(self, game: GameState, player_address: str) -> Optional[Dict]:
+        """Generate an automatic move for a player based on game type"""
+        try:
+            if game.game_type == GameType.CLAW:
+                # Claw: random prize grab attempt
+                prizes = game.current_challenge.get("prizes", [])
+                available = [p for p in prizes if not p.get("grabbed")]
+                if available:
+                    prize = random.choice(available)
+                    return {
+                        "prize_id": prize["id"],
+                        "x": prize["x"] + random.randint(-5, 5),
+                        "y": prize["y"] + random.randint(-5, 5)
+                    }
+            
+            elif game.game_type == GameType.PREDICTION:
+                # Prediction: random prediction in range
+                challenge = game.current_challenge
+                min_val = challenge.get("min", 0)
+                max_val = challenge.get("max", 100)
+                prediction = random.randint(min_val, max_val)
+                return {"prediction": prediction}
+            
+            elif game.game_type == GameType.SPEED:
+                # Speed: attempt to answer challenge
+                challenge = game.current_challenge
+                if challenge["type"] == "math":
+                    # Try to get it right (60% success for auto play)
+                    if random.random() < 0.6:
+                        return {"answer": challenge["answer"], "response_time_ms": random.randint(100, 5000)}
+                    else:
+                        return {"answer": challenge["answer"] + random.randint(1, 10), "response_time_ms": random.randint(100, 5000)}
+                elif challenge["type"] == "pattern":
+                    if random.random() < 0.6:
+                        return {"answer": challenge["answer"], "response_time_ms": random.randint(100, 5000)}
+                    else:
+                        return {"answer": challenge["answer"] + random.randint(1, 5), "response_time_ms": random.randint(100, 5000)}
+                elif challenge["type"] == "reaction":
+                    return {"answer": None, "response_time_ms": random.randint(200, 800)}
+            
+            elif game.game_type == GameType.BLACKJACK:
+                # Blackjack: simple strategy (hit on <17, stand on 17+)
+                challenge = game.current_challenge
+                hand = challenge.get("player_hands", {}).get(player_address)
+                if hand and hand.get("status") == "playing":
+                    total = game_engine._calculate_blackjack_hand(hand["cards"])
+                    if total < 17:
+                        return {"action": "hit"}
+                    else:
+                        return {"action": "stand"}
+        
+        except Exception as e:
+            logger.debug(f"Error generating auto move for {player_address}: {e}")
+        
+        return None
+    
+    async def _process_game_winners(self, arena_address: str, game_id: str):
+        """
+        Extract winners from finished game and calculate payouts.
+        Store results in MongoDB arena document.
+        """
+        try:
+            arena = await db.arenas.find_one({"address": arena_address})
+            if not arena:
+                logger.error(f"Arena {arena_address} not found for winner processing")
+                return
+            
+            if game_id not in game_engine.active_games:
+                logger.error(f"Game {game_id} not found for winner processing")
+                return
+            
+            game = game_engine.active_games[game_id]
+            
+            if game.status != "finished":
+                logger.warning(f"Game {game_id} is not finished, cannot process winners")
+                return
+            
+            # Get winners from game state
+            winners = game.winners if game.winners else []
+            
+            if not winners:
+                logger.warning(f"Game {game_id} has no winners")
+                return
+            
+            # Get player scores for verification
+            player_scores = {p.address: p.score for p in game.players.values()}
+            
+            # Calculate payouts
+            entry_fee = int(arena.get("entry_fee", "0"))
+            protocol_fee_bps = int(arena.get("protocol_fee_bps", 250))  # 2.5% default
+            players = arena.get("players", [])
+            player_count = len(players)
+            
+            # Total pool = entry_fee * number of players
+            total_pool = entry_fee * player_count
+            
+            # Calculate protocol fee
+            protocol_fee = int(total_pool * protocol_fee_bps / 10000)
+            
+            # Available for distribution to winners
+            available_for_winners = total_pool - protocol_fee
+            
+            # Distribute evenly among winners
+            payout_per_winner = available_for_winners // len(winners) if winners else 0
+            remainder = available_for_winners % len(winners) if winners else 0
+            
+            # Build payouts list (add remainder to first winner)
+            payout_amounts = []
+            for i in range(len(winners)):
+                amount = payout_per_winner
+                if i == 0:
+                    amount += remainder
+                payout_amounts.append(str(amount))
+            
+            # Store winners and payouts in arena
+            await db.arenas.update_one(
+                {"address": arena_address},
+                {
+                    "$set": {
+                        "game_status": "finished",
+                        "winners": winners,
+                        "payouts": payout_amounts,
+                        "game_results": {
+                            "winners": winners,
+                            "player_scores": player_scores,
+                            "total_pool": str(total_pool),
+                            "protocol_fee": str(protocol_fee),
+                            "payout_per_winner": str(payout_per_winner),
+                            "remainder": str(remainder),
+                            "finished_at": datetime.now(timezone.utc).isoformat()
+                        }
+                    }
+                }
+            )
+            
+            # Record individual payout records
+            for winner, amount in zip(winners, payout_amounts):
+                payout = PayoutRecord(
+                    arena_address=arena_address,
+                    winner_address=winner,
+                    amount=amount,
+                    tx_hash=""  # Will be set when finalized on-chain
+                )
+                await db.payouts.insert_one(payout.model_dump())
+            
+            # Update leaderboard entries
+            for winner, amount in zip(winners, payout_amounts):
+                current = await db.leaderboard.find_one({"address": winner})
+                current_payouts = int(current.get("total_payouts", "0")) if current else 0
+                new_payouts = current_payouts + int(amount)
+                
+                await db.leaderboard.update_one(
+                    {"address": winner},
+                    {
+                        "$set": {"total_payouts": str(new_payouts)},
+                        "$inc": {"total_wins": 1, "tournaments_won": 1}
+                    },
+                    upsert=True
+                )
+            
+            logger.info(f"Processed winners for arena {arena_address}: {winners}, payouts: {payout_amounts}")
+        
+        except Exception as e:
+            logger.error(f"Error processing game winners for {arena_address}: {e}")
     
     async def _handle_idle_expiration(self, arena_address: str):
         """Handle idle timer expiration based on player count"""
