@@ -18,6 +18,8 @@ from pydantic import BaseModel
 from typing import List
 import os
 import hashlib
+from eth_utils import keccak, to_checksum_address
+from eth_abi.packed import encode_packed
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 import logging
@@ -77,8 +79,8 @@ def sign_finalize_eip712(
     """Generate EIP-712 signature for finalize transaction"""
 
     # Compute hashes
-    winners_hash = compute_hash(winners)
-    amounts_hash = compute_hash(amounts)
+    winners_hash = compute_hash(winners, 'address')
+    amounts_hash = compute_hash(amounts, 'uint256')
 
     # EIP-712 Domain
     domain = {
@@ -128,7 +130,7 @@ def sign_finalize_eip712(
     )
 
     return {
-        "signature": signed.signature.hex(),
+        "signature": '0x' + signed.signature.hex(),
         "domain": domain,
         "types": {"Finalize": types["Finalize"]},
         "message": message

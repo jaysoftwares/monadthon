@@ -12,6 +12,21 @@ import uuid
 from datetime import datetime, timezone, timedelta
 import hashlib
 import httpx
+import time
+from web3 import Web3
+from eth_account import Account
+
+# Minimal ArenaEscrow ABI for close/finalize
+ARENA_ESCROW_ABI = [
+    {"inputs": [], "name": "usedNonce", "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}], "stateMutability": "view", "type": "function"},
+    {"inputs": [], "name": "closeRegistration", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+    {"inputs": [
+        {"internalType": "address[]", "name": "winners", "type": "address[]"},
+        {"internalType": "uint256[]", "name": "amounts", "type": "uint256[]"},
+        {"internalType": "bytes", "name": "signature", "type": "bytes"}
+    ], "name": "finalize", "outputs": [], "stateMutability": "nonpayable", "type": "function"}
+]
+
 import asyncio
 
 from game_engine import (
@@ -433,7 +448,20 @@ class ArenaTimerManager:
                     upsert=True
                 )
             
-            logger.info(f"Processed winners for arena {arena_address}: {winners}, payouts: {payout_amounts}")
+            
+            # Finalize on-chain immediately (pays winners from escrow)
+            try:
+                network = arena.get("network", os.environ.get("DEFAULT_NETWORK", "testnet"))
+                finalize_tx = await _finalize_onchain(arena_address, winners, payout_amounts, network)
+                await db.arenas.update_one(
+                    {"address": arena_address},
+                    {"$set": {"is_finalized": True, "finalize_tx_hash": finalize_tx, "finalized_at": datetime.now(timezone.utc).isoformat()}}
+                )
+                # Update payout records with tx hash
+                await db.payouts.update_many({"arena_address": arena_address}, {"$set": {"tx_hash": finalize_tx}})
+            except Exception as e:
+                logger.error(f"On-chain finalization failed for arena {arena_address}: {e}")
+logger.info(f"Processed winners for arena {arena_address}: {winners}, payouts: {payout_amounts}")
         
         except Exception as e:
             logger.error(f"Error processing game winners for {arena_address}: {e}")
@@ -503,6 +531,84 @@ class ArenaTimerManager:
             logger.error(f"Error handling idle expiration for arena {arena_address}: {e}")
 
 timer_manager = ArenaTimerManager()
+
+def _get_rpc_url_for_network(network: str) -> str:
+    if network == "mainnet":
+        return os.environ.get("MAINNET_RPC_URL", "https://rpc.monad.xyz")
+    return os.environ.get("TESTNET_RPC_URL", "https://testnet-rpc.monad.xyz")
+
+def _get_chain_id_for_network(network: str) -> int:
+    if network == "mainnet":
+        return int(os.environ.get("MAINNET_CHAIN_ID", "143"))
+    return int(os.environ.get("TESTNET_CHAIN_ID", "10143"))
+
+def _get_operator_account() -> Account:
+    pk = os.environ.get("OPERATOR_PRIVATE_KEY", "")
+    if not pk:
+        raise RuntimeError("OPERATOR_PRIVATE_KEY not set (needed to submit closeRegistration/finalize txs)")
+    return Account.from_key(pk)
+
+def _send_contract_tx(w3: Web3, contract, fn, account: Account, value_wei: int = 0) -> str:
+    nonce = w3.eth.get_transaction_count(account.address)
+    tx = fn.build_transaction({
+        "from": account.address,
+        "nonce": nonce,
+        "gas": 500000,  # generous; Monad is cheap
+        "gasPrice": w3.eth.gas_price,
+        "value": value_wei,
+        "chainId": w3.eth.chain_id,
+    })
+    signed = account.sign_transaction(tx)
+    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    return tx_hash.hex()
+
+async def _close_registration_onchain(arena_address: str, network: str) -> str:
+    rpc = _get_rpc_url_for_network(network)
+    w3 = Web3(Web3.HTTPProvider(rpc))
+    account = _get_operator_account()
+    escrow = w3.eth.contract(address=Web3.to_checksum_address(arena_address), abi=ARENA_ESCROW_ABI)
+    try:
+        txh = _send_contract_tx(w3, escrow, escrow.functions.closeRegistration(), account)
+        return txh
+    except Exception as e:
+        logger.error(f"closeRegistration on-chain failed for {arena_address}: {e}")
+        raise
+
+async def _finalize_onchain(arena_address: str, winners: list, amounts: list, network: str) -> str:
+    rpc = _get_rpc_url_for_network(network)
+    w3 = Web3(Web3.HTTPProvider(rpc))
+    account = _get_operator_account()
+    escrow = w3.eth.contract(address=Web3.to_checksum_address(arena_address), abi=ARENA_ESCROW_ABI)
+
+    # Read current nonce from chain; contract uses nonce = usedNonce + 1 internally,
+    # but the signature must be created with that exact nonce.
+    used = escrow.functions.usedNonce().call()
+    nonce_to_sign = int(used) + 1
+
+    # Request signature from signer service
+    chain_id = _get_chain_id_for_network(network)
+    signer_url = os.environ.get("AGENT_SIGNER_URL", "http://localhost:8002").rstrip("/")
+    payload = {"arena_address": arena_address, "winners": winners, "amounts": [str(a) for a in amounts], "nonce": nonce_to_sign, "chain_id": chain_id}
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(f"{signer_url}/sign/finalize", json=payload)
+        r.raise_for_status()
+        sig = r.json().get("signature")
+        if not sig:
+            raise RuntimeError("Signer did not return signature")
+
+    # Submit finalize tx
+    try:
+        txh = _send_contract_tx(w3, escrow, escrow.functions.finalize(
+            [Web3.to_checksum_address(w) for w in winners],
+            [int(a) for a in amounts],
+            Web3.to_bytes(hexstr=sig)
+        ), account)
+        return txh
+    except Exception as e:
+        logger.error(f"finalize on-chain failed for {arena_address}: {e}")
+        raise
+
 
 # ===========================================
 # MODELS
@@ -1050,6 +1156,14 @@ async def join_arena(join_data: JoinArena):
             {"$set": {"is_closed": True, "closed_at": datetime.now(timezone.utc).isoformat()}}
         )
         
+        # Also close registration on-chain (contract enforces onlyFactoryOwner; agent holds deployer key)
+        try:
+            network = updated_arena.get('network', os.environ.get('DEFAULT_NETWORK', 'testnet'))
+            close_tx = await _close_registration_onchain(join_data.arena_address, network)
+            await db.arenas.update_one({"address": join_data.arena_address}, {"$set": {"close_tx_hash": close_tx}})
+        except Exception as e:
+            logger.error(f"Failed to close registration on-chain for {join_data.arena_address}: {e}")
+
         await timer_manager.start_game_countdown(join_data.arena_address, countdown_seconds=10)
         
         response["arena_full"] = True

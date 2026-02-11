@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { getArena, joinArena, formatMON, getExplorerUrl, getGameState, getGameRules } from '../services/api';
 import { useWallet } from '../context/WalletContext';
+import { useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
+
 import { Skeleton } from '../components/ui/skeleton';
 import CountdownTimer from '../components/CountdownTimer';
 import {
@@ -11,6 +13,13 @@ import {
   CheckCircle, XCircle, Loader2, Copy, Check, Bot, Timer, Globe, AlertTriangle, Zap
 } from 'lucide-react';
 import { toast } from 'sonner';
+
+const ARENA_ESCROW_ABI = [
+  { type: 'function', name: 'join', stateMutability: 'payable', inputs: [], outputs: [] },
+];
+
+
+
 
 const ArenaPage = () => {
   const { address } = useParams();
@@ -96,26 +105,37 @@ const ArenaPage = () => {
       await connect();
       return;
     }
+    if (!arena?.address) {
+      toast.error('Arena not loaded yet');
+      return;
+    }
 
     setJoining(true);
     try {
-      // In production, this would:
-      // 1. Call the smart contract join() function with entry fee
-      // 2. Wait for transaction confirmation
-      // 3. Then call the API to record the join
-      
-      // Mock transaction hash for demo
-      const mockTxHash = '0x' + Array(64).fill(0).map(() => Math.floor(Math.random() * 16).toString(16)).join('');
-      
-      await joinArena(address, walletAddress, mockTxHash);
-      toast.success('Successfully joined the arena!');
-      
-      // Refresh arena data
-      const data = await getArena(address);
-      setArena(data);
-    } catch (error) {
-      console.error('Failed to join arena:', error);
-      toast.error(error.response?.data?.detail || 'Failed to join arena');
+      // 1) Send on-chain join transaction (escrow funding)
+      const value = BigInt(arena.entry_fee); // already wei string
+      const hash = await writeContractAsync({
+        address: arena.address,
+        abi: ARENA_ESCROW_ABI,
+        functionName: 'join',
+        value,
+      });
+      setPendingTx(hash);
+
+      // 2) Wait briefly for confirmation (backend expects a real tx hash)
+      // wagmi will keep updating isTxConfirming; we also await receipt by polling via backend if desired.
+      toast.message('Transaction submitted', { description: hash });
+
+      // 3) Record join in backend (after tx submission; backend can optionally verify on-chain)
+      await joinArena(address, walletAddress, hash);
+      toast.success('Successfully joined arena!');
+
+      // Refresh arena state
+      const updated = await getArena(address);
+      setArena(updated);
+    } catch (err) {
+      console.error(err);
+      toast.error(err?.shortMessage || err?.message || 'Failed to join arena');
     } finally {
       setJoining(false);
     }

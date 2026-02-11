@@ -24,7 +24,7 @@ Usage:
 
 Environment variables:
     API_BASE       - Backend API URL (default: http://localhost:8000)
-    ADMIN_KEY      - Admin API key   (default: claw-arena-admin-key)
+    ADMIN_KEY      - Admin API key   (default: claw-arena-admin-keycl)
 """
 
 import os

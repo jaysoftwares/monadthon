@@ -1,0 +1,295 @@
+"""
+CLAW ARENA - Bot Player for Testing
+
+This bot joins arenas and plays games automatically.
+Useful for testing the game flow without needing multiple real players.
+
+Usage:
+    python bot_player.py <arena_address> [--count 1] [--delay 2]
+"""
+
+import asyncio
+import aiohttp
+import argparse
+import random
+import time
+from typing import Dict, List, Optional
+
+API_BASE = "http://localhost:8000"
+
+# Bot wallet addresses (fake addresses for testing)
+BOT_ADDRESSES = [
+    "0xB0T0000000000000000000000000000000000001",
+    "0xB0T0000000000000000000000000000000000002",
+    "0xB0T0000000000000000000000000000000000003",
+    "0xB0T0000000000000000000000000000000000004",
+    "0xB0T0000000000000000000000000000000000005",
+]
+
+
+class BlackjackStrategy:
+    """Basic blackjack strategy for the bot"""
+    
+    @staticmethod
+    def calculate_hand(cards: List[Dict]) -> int:
+        """Calculate blackjack hand value"""
+        total = 0
+        aces = 0
+        
+        for card in cards:
+            rank = card["rank"]
+            if rank in ["J", "Q", "K"]:
+                total += 10
+            elif rank == "A":
+                aces += 1
+                total += 11
+            else:
+                total += int(rank)
+        
+        while total > 21 and aces > 0:
+            total -= 10
+            aces -= 1
+        
+        return total
+    
+    @staticmethod
+    def should_hit(hand_value: int, dealer_up_card: Optional[Dict] = None) -> bool:
+        """Basic strategy: hit if under 17, stand otherwise"""
+        if hand_value < 12:
+            return True  # Always hit on 11 or less
+        elif hand_value >= 17:
+            return False  # Always stand on 17+
+        else:
+            # Between 12-16: hit with some probability
+            # More aggressive strategy for testing
+            return hand_value < 15 or random.random() < 0.3
+
+
+class BotPlayer:
+    """A bot that plays in Claw Arena games"""
+    
+    def __init__(self, address: str, name: str = None):
+        self.address = address
+        self.name = name or f"Bot-{address[-4:]}"
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.current_arena: Optional[str] = None
+        self.current_game: Optional[Dict] = None
+    
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession()
+        return self
+    
+    async def __aexit__(self, *args):
+        if self.session:
+            await self.session.close()
+    
+    async def join_arena(self, arena_address: str) -> bool:
+        """Join an arena by registering as a player"""
+        try:
+            # Simulated join (in real scenario, this would be on-chain)
+            payload = {
+                "arena_address": arena_address,
+                "player_address": self.address,
+                "tx_hash": f"0x{''.join(random.choices('0123456789abcdef', k=64))}"
+            }
+            
+            async with self.session.post(
+                f"{API_BASE}/api/arenas/join",
+                json=payload
+            ) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    print(f"[{self.name}] Joined arena {arena_address[:10]}...")
+                    self.current_arena = arena_address
+                    return True
+                else:
+                    error = await resp.text()
+                    print(f"[{self.name}] Failed to join: {error}")
+                    return False
+        except Exception as e:
+            print(f"[{self.name}] Error joining: {e}")
+            return False
+    
+    async def get_game_state(self) -> Optional[Dict]:
+        """Get current game state for the arena"""
+        if not self.current_arena:
+            return None
+        
+        try:
+            async with self.session.get(
+                f"{API_BASE}/api/arenas/{self.current_arena}/game"
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                return None
+        except Exception as e:
+            print(f"[{self.name}] Error getting game state: {e}")
+            return None
+    
+    async def submit_move(self, move_data: Dict) -> Dict:
+        """Submit a move in the current game"""
+        if not self.current_arena:
+            return {"success": False, "message": "Not in arena"}
+        
+        try:
+            payload = {
+                "arena_address": self.current_arena,
+                "player_address": self.address,
+                "move_data": move_data
+            }
+            
+            async with self.session.post(
+                f"{API_BASE}/api/arenas/{self.current_arena}/game/move",
+                json=payload
+            ) as resp:
+                result = await resp.json()
+                return result
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+    
+    async def play_blackjack_turn(self, game_state: Dict) -> None:
+        """Play a turn of blackjack"""
+        if game_state.get("status") != "active":
+            return
+        
+        challenge = game_state.get("current_challenge", {})
+        if challenge.get("type") != "blackjack_round":
+            return
+        
+        player_hands = challenge.get("player_hands", {})
+        my_hand = player_hands.get(self.address)
+        
+        if not my_hand or my_hand.get("status") != "playing":
+            return
+        
+        cards = my_hand.get("cards", [])
+        hand_value = BlackjackStrategy.calculate_hand(cards)
+        
+        # Decide action
+        if BlackjackStrategy.should_hit(hand_value):
+            action = "hit"
+        else:
+            action = "stand"
+        
+        print(f"[{self.name}] Hand: {self._format_cards(cards)} = {hand_value}, Action: {action.upper()}")
+        
+        result = await self.submit_move({"action": action})
+        
+        if result.get("success"):
+            print(f"[{self.name}] {result.get('message', 'Move accepted')}")
+        else:
+            print(f"[{self.name}] Move failed: {result.get('message')}")
+    
+    def _format_cards(self, cards: List[Dict]) -> str:
+        """Format cards for display"""
+        symbols = {"hearts": "H", "diamonds": "D", "clubs": "C", "spades": "S"}
+        return " ".join(f"{c['rank']}{symbols.get(c['suit'], '?')}" for c in cards)
+    
+    async def play_game_loop(self, poll_interval: float = 1.0) -> None:
+        """Main game loop - poll for state and play when it's our turn"""
+        print(f"[{self.name}] Starting game loop...")
+        
+        last_round = 0
+        consecutive_errors = 0
+        
+        while consecutive_errors < 5:
+            try:
+                game_state = await self.get_game_state()
+                
+                if not game_state:
+                    await asyncio.sleep(poll_interval)
+                    continue
+                
+                status = game_state.get("status")
+                
+                if status == "waiting":
+                    print(f"[{self.name}] Waiting for game to start...")
+                    await asyncio.sleep(poll_interval * 2)
+                    continue
+                
+                if status == "learning":
+                    print(f"[{self.name}] Learning phase - reading rules...")
+                    await asyncio.sleep(poll_interval)
+                    continue
+                
+                if status == "finished":
+                    print(f"[{self.name}] Game finished!")
+                    # Check if we won
+                    leaderboard = game_state.get("leaderboard", [])
+                    for i, entry in enumerate(leaderboard):
+                        if entry.get("address") == self.address:
+                            print(f"[{self.name}] Final position: #{i+1} with {entry.get('score', 0)} points")
+                    break
+                
+                if status == "active":
+                    current_round = game_state.get("round_number", 0)
+                    
+                    if current_round > last_round:
+                        last_round = current_round
+                        print(f"[{self.name}] Round {current_round}")
+                    
+                    # Play based on game type
+                    game_type = game_state.get("game_type")
+                    
+                    if game_type == "blackjack":
+                        await self.play_blackjack_turn(game_state)
+                    else:
+                        print(f"[{self.name}] Unknown game type: {game_type}")
+                
+                consecutive_errors = 0
+                await asyncio.sleep(poll_interval)
+                
+            except Exception as e:
+                print(f"[{self.name}] Error in game loop: {e}")
+                consecutive_errors += 1
+                await asyncio.sleep(poll_interval * 2)
+        
+        print(f"[{self.name}] Exiting game loop")
+
+
+async def run_bots(arena_address: str, bot_count: int = 1, join_delay: float = 1.0):
+    """Run multiple bots for an arena"""
+    print(f"\n[BOT] Starting {bot_count} bot(s) for arena {arena_address[:10]}...\n")
+    
+    bots: List[BotPlayer] = []
+    
+    for i in range(min(bot_count, len(BOT_ADDRESSES))):
+        bot = BotPlayer(BOT_ADDRESSES[i], f"Bot-{i+1}")
+        bots.append(bot)
+    
+    async with aiohttp.ClientSession() as session:
+        # Assign session to all bots
+        for bot in bots:
+            bot.session = session
+        
+        # Join arena
+        print("[JOIN] Bots joining arena...")
+        for bot in bots:
+            await bot.join_arena(arena_address)
+            await asyncio.sleep(join_delay)
+        
+        print("\n[WAIT] Waiting for game to start...\n")
+        
+        # Run game loops concurrently
+        await asyncio.gather(*[bot.play_game_loop() for bot in bots])
+    
+    print("\n[DONE] All bots finished!")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Claw Arena Bot Player")
+    parser.add_argument("arena", help="Arena contract address")
+    parser.add_argument("--count", "-c", type=int, default=1, help="Number of bots (max 5)")
+    parser.add_argument("--delay", "-d", type=float, default=1.0, help="Delay between bot joins")
+    
+    args = parser.parse_args()
+    
+    asyncio.run(run_bots(
+        arena_address=args.arena,
+        bot_count=args.count,
+        join_delay=args.delay
+    ))
+
+
+if __name__ == "__main__":
+    main()
