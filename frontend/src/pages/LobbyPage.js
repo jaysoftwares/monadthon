@@ -90,7 +90,8 @@ const LobbyPage = () => {
   }, [chainId, isConnected, fetchData]);
 
   const openArenas = arenas.filter(a => !a.is_closed && !a.is_finalized);
-  const closedArenas = arenas.filter(a => a.is_closed || a.is_finalized);
+  const activeArenas = arenas.filter(a => a.is_closed && !a.is_finalized);
+  const closedArenas = arenas.filter(a => a.is_finalized);
 
   return (
     <div className="min-h-screen" data-testid="lobby-page">
@@ -295,6 +296,24 @@ const LobbyPage = () => {
           )}
         </div>
       </section>
+
+      {/* Active Tournaments (in-progress: closed but not finalized) */}
+      {activeArenas.length > 0 && (
+        <section className="py-16 bg-gradient-to-b from-purple-50 to-white" data-testid="active-arenas-section">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="mb-8">
+              <h2 className="font-heading text-2xl font-bold text-gray-900">Active Tournaments</h2>
+              <p className="text-gray-500 mt-1">Games currently in progress</p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {activeArenas.map((arena) => (
+                <ArenaCard key={arena.address} arena={arena} />
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Past Arenas */}
       {closedArenas.length > 0 && (
