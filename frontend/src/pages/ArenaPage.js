@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { getArena, joinArena, formatMON, getExplorerUrl, getGameState, getGameRules } from '../services/api';
 import { useWallet } from '../context/WalletContext';
@@ -18,9 +18,6 @@ const ARENA_ESCROW_ABI = [
   { type: 'function', name: 'join', stateMutability: 'payable', inputs: [], outputs: [] },
 ];
 
-
-
-
 const ArenaPage = () => {
   const { address } = useParams();
   const { isConnected, address: walletAddress, connect } = useWallet();
@@ -33,6 +30,43 @@ const ArenaPage = () => {
   const [showHowToPlay, setShowHowToPlay] = useState(false);
   const [gameCountdown, setGameCountdown] = useState(null);
   const [gameStartTime, setGameStartTime] = useState(null);
+
+  // ✅ MISSING STATE (you call setPendingTx but never defined it)
+  const [pendingTx, setPendingTx] = useState(null);
+
+  // ✅ WAGMI WRITE HOOK
+  const writeHook = useWriteContract();
+
+  // ✅ COMPAT: some wagmi versions expose writeContractAsync; some only writeContract
+  const writeContractAsync = useMemo(() => {
+    if (typeof writeHook?.writeContractAsync === 'function') {
+      return writeHook.writeContractAsync;
+    }
+
+    // Fallback wrapper around writeContract (mutation-style)
+    if (typeof writeHook?.writeContract === 'function') {
+      return (config) =>
+        new Promise((resolve, reject) => {
+          try {
+            writeHook.writeContract(config, {
+              onSuccess: (data) => resolve(data),
+              onError: (err) => reject(err),
+            });
+          } catch (err) {
+            reject(err);
+          }
+        });
+    }
+
+    // If neither exists, throw a clear error
+    return () => {
+      throw new Error('wagmi write function not available (writeContract / writeContractAsync missing)');
+    };
+  }, [writeHook]);
+
+  // (optional) keep import; not changing UI
+  // If you later want to use it, you can:
+  // const receipt = useWaitForTransactionReceipt({ hash: pendingTx, query: { enabled: !!pendingTx } });
 
   // Fetch arena and game state
   useEffect(() => {
@@ -83,7 +117,7 @@ const ArenaPage = () => {
     // Calculate time until game starts (10 seconds after arena closes)
     const closedTime = new Date(arena.closed_at);
     const gameStartEstimate = new Date(closedTime.getTime() + 10000); // 10 seconds
-    
+
     const updateCountdown = () => {
       const now = new Date();
       const remaining = Math.max(0, Math.floor((gameStartEstimate - now) / 1000));
@@ -120,10 +154,10 @@ const ArenaPage = () => {
         functionName: 'join',
         value,
       });
+
       setPendingTx(hash);
 
       // 2) Wait briefly for confirmation (backend expects a real tx hash)
-      // wagmi will keep updating isTxConfirming; we also await receipt by polling via backend if desired.
       toast.message('Transaction submitted', { description: hash });
 
       // 3) Record join in backend (after tx submission; backend can optionally verify on-chain)
@@ -217,7 +251,7 @@ const ArenaPage = () => {
             <ArrowLeft className="w-4 h-4" />
             Back to Lobby
           </Link>
-          
+
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
               <div className="flex items-center gap-3">
@@ -277,7 +311,7 @@ const ArenaPage = () => {
                 ✕
               </button>
             </div>
-            
+
             <div className="p-6">
               <div className="mb-6">
                 <h3 className="font-heading text-xl font-bold text-gray-900 mb-2">{gameRules.name}</h3>
@@ -346,7 +380,7 @@ const ArenaPage = () => {
                 Round {gameState.round_number} • {gameState.time_remaining_seconds}s remaining
               </p>
             </div>
-            
+
             {gameState.leaderboard && gameState.leaderboard.length > 0 && (
               <div className="p-6">
                 <h4 className="font-heading font-semibold text-gray-900 mb-4">Current Scores</h4>
@@ -393,7 +427,7 @@ const ArenaPage = () => {
             </div>
             <p className="font-heading text-2xl font-bold text-gray-900">{formatMON(arena.entry_fee)} MON</p>
           </div>
-          
+
           <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-card">
             <div className="flex items-center gap-2 text-gray-500 text-sm mb-2">
               <Users className="w-4 h-4" />
@@ -401,7 +435,7 @@ const ArenaPage = () => {
             </div>
             <p className="font-heading text-2xl font-bold text-gray-900">{playerCount} / {arena.max_players}</p>
           </div>
-          
+
           <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-card">
             <div className="flex items-center gap-2 text-gray-500 text-sm mb-2">
               <Trophy className="w-4 h-4" />
@@ -409,7 +443,7 @@ const ArenaPage = () => {
             </div>
             <p className="font-heading text-2xl font-bold text-[#836EF9]">{formatMON(prizePool.toString())} MON</p>
           </div>
-          
+
           <div className="bg-white rounded-xl p-5 border border-gray-100 shadow-card">
             <div className="flex items-center gap-2 text-gray-500 text-sm mb-2">
               <Clock className="w-4 h-4" />
@@ -486,7 +520,7 @@ const ArenaPage = () => {
           <div className="p-6 border-b border-gray-100">
             <h3 className="font-heading text-xl font-semibold text-gray-900">Players ({playerCount})</h3>
           </div>
-          
+
           {playerCount > 0 ? (
             <div className="divide-y divide-gray-50">
               {arena.players.map((player, index) => (
@@ -530,7 +564,7 @@ const ArenaPage = () => {
                 Tournament Results
               </h3>
             </div>
-            
+
             <div className="divide-y divide-gray-50">
               {arena.winners.map((winner, index) => (
                 <div key={winner} className="px-6 py-4 flex items-center justify-between" data-testid={`winner-${index}`}>
