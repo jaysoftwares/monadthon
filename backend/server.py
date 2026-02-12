@@ -125,58 +125,28 @@ async def _delete_arena_after_delay(arena_address: str, delay_seconds: int = 8):
 
 
 class ArenaTimerManager:
-    """Manages game start countdowns and idle timers for arenas"""
-
     def __init__(self):
-        self.arena_timers: Dict[str, Dict[str, Any]] = {}  # arena_address -> timer dict
+        self.arena_timers = {}  # arena_address -> timer_data
         self.background_task = None
 
-    async def start_game_countdown(self, arena_address: str, countdown_seconds: int = 10):
-        """Start a countdown timer before game begins"""
-        countdown_ends_at = (datetime.now(timezone.utc) + timedelta(seconds=countdown_seconds)).isoformat()
-
-        self.arena_timers[arena_address] = {
-            "type": "game_start_countdown",
-            "countdown_starts": datetime.now(timezone.utc).isoformat(),
-            "countdown_ends_at": countdown_ends_at,
-            "countdown_seconds": countdown_seconds,
-            "game_started": False,
-        }
-
-        # Persist countdown timer in DB (optional, but useful for frontend countdown)
-        try:
-            await db.arenas.update_one(
-                {"address": arena_address},
-                {
-                    "$set": {
-                        "countdown_starts_at": self.arena_timers[arena_address]["countdown_starts"],
-                        "countdown_ends_at": countdown_ends_at,
-                    }
-                },
-            )
-        except Exception as e:
-            logger.error(f"Failed to persist countdown timer for {arena_address}: {e}")
-
-        logger.info(f"Started game countdown for arena {arena_address}, ends in {countdown_seconds}s")
-
-    async def start_idle_timer(self, arena_address: str, idle_seconds: int = 20):
-        """Start an idle timer for arenas with 0 or 1 player"""
+    async def start_idle_timer(self, arena_address: str, idle_seconds: int = 60):
+        """Start an idle timer for 1 minute"""
+        idle_starts = datetime.now(timezone.utc).isoformat()
         idle_ends_at = (datetime.now(timezone.utc) + timedelta(seconds=idle_seconds)).isoformat()
 
         self.arena_timers[arena_address] = {
             "type": "idle_timer",
-            "idle_starts": datetime.now(timezone.utc).isoformat(),
+            "idle_starts": idle_starts,
             "idle_ends_at": idle_ends_at,
             "idle_seconds": idle_seconds,
         }
 
-        # Persist idle timer in DB so frontend can show an accurate countdown
         try:
             await db.arenas.update_one(
                 {"address": arena_address},
                 {
                     "$set": {
-                        "idle_starts_at": self.arena_timers[arena_address]["idle_starts"],
+                        "idle_starts_at": idle_starts,
                         "idle_ends_at": idle_ends_at,
                     }
                 },
@@ -186,64 +156,73 @@ class ArenaTimerManager:
 
         logger.info(f"Started idle timer for arena {arena_address}, expires in {idle_seconds}s")
 
-    async def cancel_timer(self, arena_address: str):
-        """Cancel any timer for an arena"""
-        if arena_address in self.arena_timers:
-            # Clear persisted timer fields
-            try:
+    async def _handle_idle_expiration(self, arena_address: str):
+        """Handle 1-minute timeout: Refund and reset, but DO NOT delete."""
+        try:
+            arena = await db.arenas.find_one({"address": arena_address})
+            if not arena:
+                return
+
+            players = arena.get("players", [])
+            player_count = len(players)
+
+            # Case: 0 players
+            if player_count == 0:
                 await db.arenas.update_one(
                     {"address": arena_address},
-                    {
-                        "$unset": {
-                            "idle_starts_at": "",
-                            "idle_ends_at": "",
-                            "countdown_starts_at": "",
-                            "countdown_ends_at": "",
-                        }
-                    },
+                    {"$unset": {"idle_starts_at": "", "idle_ends_at": ""}}
                 )
-            except Exception as e:
-                logger.error(f"Failed to clear persisted timer fields for {arena_address}: {e}")
+                return
 
-            del self.arena_timers[arena_address]
-            logger.info(f"Cancelled timer for arena {arena_address}")
+            # Case: 1 player (Trigger Refund)
+            if player_count == 1:
+                try:
+                    network = arena.get("network", "monad_testnet")
+                    refund_tx = await _cancel_and_refund_onchain(arena_address, network)
 
-    async def get_timer_status(self, arena_address: str) -> Optional[Dict[str, Any]]:
-        """Get current timer status for an arena"""
-        return self.arena_timers.get(arena_address)
+                    await db.arenas.update_one(
+                        {"address": arena_address},
+                        {
+                            "$set": {
+                                "players": [],
+                                "is_closed": False,
+                                "is_finalized": False,
+                                "status": "active",
+                                "last_refund_tx": refund_tx
+                            },
+                            "$unset": {"idle_starts_at": "", "idle_ends_at": ""}
+                        },
+                    )
+                    logger.info(f"Refunded {arena_address}. Tx: {refund_tx}")
+                except Exception as e:
+                    logger.error(f"Refund failed: {e}")
+                return
+
+            # Case: 2+ players (Start Game)
+            await db.arenas.update_one(
+                {"address": arena_address},
+                {"$set": {"is_closed": True}},
+            )
+            network = arena.get("network", "monad_testnet")
+            await _close_registration_onchain(arena_address, network)
+
+        except Exception as e:
+            logger.error(f"Error in idle expiration: {e}")
 
     async def process_timers(self):
-        """Background task to process expiring timers"""
+        """Background loop to check for expired timers"""
         while True:
             try:
-                await asyncio.sleep(1)
                 now = datetime.now(timezone.utc)
-                expired_arenas = []
+                expired = [addr for addr, t in self.arena_timers.items() 
+                           if now >= datetime.fromisoformat(t["idle_ends_at"])]
 
-                for arena_address, timer in list(self.arena_timers.items()):
-                    try:
-                        if timer["type"] == "game_start_countdown":
-                            countdown_ends = datetime.fromisoformat(timer["countdown_ends_at"].replace("Z", "+00:00"))
-                            if now >= countdown_ends and not timer.get("game_started"):
-                                await self._trigger_game_start(arena_address)
-                                timer["game_started"] = True
-                                expired_arenas.append(arena_address)
-
-                        elif timer["type"] == "idle_timer":
-                            idle_ends = datetime.fromisoformat(timer["idle_ends_at"].replace("Z", "+00:00"))
-                            if now >= idle_ends:
-                                await self._handle_idle_expiration(arena_address)
-                                expired_arenas.append(arena_address)
-
-                    except Exception as e:
-                        logger.error(f"Error processing timer for arena {arena_address}: {e}")
-
-                for arena_address in expired_arenas:
-                    await self.cancel_timer(arena_address)
-
+                for addr in expired:
+                    self.arena_timers.pop(addr)
+                    await self._handle_idle_expiration(addr)
             except Exception as e:
-                logger.error(f"Error in timer processing loop: {e}")
-                await asyncio.sleep(5)
+                logger.error(f"Timer loop error: {e}")
+            await asyncio.sleep(1)
 
     async def _trigger_game_start(self, arena_address: str):
         """Trigger game start after countdown expires and automatically play through all rounds"""
@@ -497,102 +476,6 @@ class ArenaTimerManager:
 
         except Exception as e:
             logger.error(f"Error processing game winners for {arena_address}: {e}")
-
-    async def _handle_idle_expiration(self, arena_address: str):
-        """Handle idle timer expiration based on player count"""
-        try:
-            arena = await db.arenas.find_one({"address": arena_address})
-            if not arena:
-                logger.warning(f"Arena {arena_address} not found for idle handling")
-                return
-
-            players = arena.get("players", [])
-            player_count = len(players)
-
-            if player_count == 0:
-                await db.arenas.delete_one({"address": arena_address})
-                logger.info(f"Deleted empty arena {arena_address}")
-                return
-
-            if player_count == 1:
-                player_address = players[0]
-                entry_fee = arena.get("entry_fee", "0")
-                cancelled_at = datetime.now(timezone.utc).isoformat()
-
-                await db.arenas.update_one(
-                    {"address": arena_address},
-                    {
-                        "$set": {
-                            "is_cancelled": True,
-                            "cancel_reason": "idle_timeout_single_player",
-                            "cancelled_at": cancelled_at,
-                        }
-                    },
-                )
-
-                refund_record = {
-                    "arena_address": arena_address,
-                    "player_address": player_address,
-                    "amount": entry_fee,
-                    "reason": "idle_timeout_single_player",
-                    "created_at": cancelled_at,
-                    "status": "pending",
-                    "refund_tx_hash": None,
-                }
-
-                try:
-                    network = arena.get("network", DEFAULT_NETWORK)
-                    refund_tx = await _cancel_and_refund_onchain(arena_address, network)
-
-                    refund_record["status"] = "submitted"
-                    refund_record["refund_tx_hash"] = refund_tx
-
-                    await db.arenas.update_one(
-                        {"address": arena_address},
-                        {"$set": {"refund_tx_hash": refund_tx, "refund_status": "submitted"}},
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to cancel/refund on-chain for {arena_address}: {e}")
-                    refund_record["status"] = "failed"
-                    await db.arenas.update_one(
-                        {"address": arena_address},
-                        {"$set": {"refund_status": "failed", "refund_error": str(e)}},
-                    )
-
-                await db.refunds.insert_one(refund_record)
-
-                asyncio.create_task(_delete_arena_after_delay(arena_address, delay_seconds=8))
-
-                logger.info(f"Cancelled arena {arena_address} with 1 player, refund status: {refund_record['status']}")
-                return
-
-            # player_count >= 2
-            await db.arenas.update_one(
-                {"address": arena_address},
-                {"$set": {"is_closed": True, "closed_at": datetime.now(timezone.utc).isoformat()}},
-            )
-
-            try:
-                network = arena.get("network", DEFAULT_NETWORK)
-                close_tx = await _close_registration_onchain(arena_address, network)
-                await db.arenas.update_one(
-                    {"address": arena_address},
-                    {"$set": {"close_tx_hash": close_tx}},
-                )
-            except Exception as e:
-                logger.error(f"Failed to close registration on-chain for idle timer arena {arena_address}: {e}")
-
-            logger.info(
-                f"Closed registration for arena {arena_address} after idle timeout with {player_count} players, starting game"
-            )
-
-            await self._trigger_game_start(arena_address)
-
-        except Exception as e:
-            logger.error(f"Error handling idle expiration for arena {arena_address}: {e}")
-
-
-
 
 timer_manager = ArenaTimerManager()
 
