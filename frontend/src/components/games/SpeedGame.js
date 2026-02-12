@@ -5,7 +5,7 @@
  * Faster correct answers = more points.
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -53,27 +53,7 @@ export default function SpeedGame({ arenaAddress, playerAddress, gameState, onSu
     }
   }, [round, challengeType, challenge.delay_ms, challenge.time_limit]);
 
-  // Countdown timer
-  useEffect(() => {
-    if (roundTimeLeft <= 0 || submitted) return;
-
-    const timer = setInterval(() => {
-      setRoundTimeLeft(prev => {
-        if (prev <= 1) {
-          // Time's up - auto submit wrong answer
-          if (!submitted) {
-            handleSubmit(true);
-          }
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [roundTimeLeft, submitted]);
-
-  const handleSubmit = async (timeout = false) => {
+  const handleSubmit = useCallback(async (timeout = false) => {
     if (submitted) return;
 
     const responseTime = startTime ? Date.now() - startTime : 10000;
@@ -102,7 +82,27 @@ export default function SpeedGame({ arenaAddress, playerAddress, gameState, onSu
     } catch (err) {
       setLastResult({ success: false, message: err.message });
     }
-  };
+  }, [submitted, startTime, answer, challengeType, showReactionTarget, reactionStart, onSubmitMove]);
+
+  // Countdown timer
+  useEffect(() => {
+    if (roundTimeLeft <= 0 || submitted) return;
+
+    const timer = setInterval(() => {
+      setRoundTimeLeft(prev => {
+        if (prev <= 1) {
+          // Time's up - auto submit wrong answer
+          if (!submitted) {
+            handleSubmit(true);
+          }
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [roundTimeLeft, submitted, handleSubmit]);
 
   const handleReactionClick = () => {
     if (submitted) return;

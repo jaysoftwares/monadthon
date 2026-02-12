@@ -5,7 +5,7 @@
  * Uses click/tap to position and drop the claw.
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
@@ -65,7 +65,7 @@ export default function ClawGame({ arenaAddress, playerAddress, gameState, onSub
   };
 
   // Drop the claw
-  const handleDrop = async () => {
+  const handleDrop = useCallback(async () => {
     if (isDropping || attemptsLeft <= 0) return;
 
     setIsDropping(true);
@@ -117,7 +117,7 @@ export default function ClawGame({ arenaAddress, playerAddress, gameState, onSub
 
     // Refresh game state
     onRefresh();
-  };
+  }, [isDropping, attemptsLeft, prizes, clawPosition.x, onSubmitMove, onRefresh]);
 
   // Keyboard controls
   useEffect(() => {
@@ -142,7 +142,7 @@ export default function ClawGame({ arenaAddress, playerAddress, gameState, onSub
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isDropping, attemptsLeft]);
+  }, [isDropping, attemptsLeft, handleDrop]);
 
   return (
     <div className="w-full max-w-2xl mx-auto space-y-4">

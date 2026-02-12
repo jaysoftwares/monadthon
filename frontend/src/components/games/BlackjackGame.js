@@ -4,7 +4,7 @@
  * Classic Blackjack tournament - beat the dealer and outscore other players.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
@@ -103,6 +103,23 @@ export default function BlackjackGame({ arenaAddress, playerAddress, gameState, 
     setRoundTimeLeft(challenge.time_limit || 30);
   }, [round, challenge.time_limit]);
 
+  const handleAction = useCallback(async (action) => {
+    if (actionTaken || myStatus !== 'playing') return;
+
+    try {
+      const result = await onSubmitMove({ action });
+      setLastResult(result);
+
+      if (action === 'stand' || result.game_state?.total > 21) {
+        setActionTaken(true);
+      }
+
+      onRefresh();
+    } catch (err) {
+      setLastResult({ success: false, message: err.message });
+    }
+  }, [actionTaken, myStatus, onSubmitMove, onRefresh]);
+
   // Countdown timer
   useEffect(() => {
     if (roundTimeLeft <= 0 || myStatus !== 'playing') return;
@@ -119,24 +136,7 @@ export default function BlackjackGame({ arenaAddress, playerAddress, gameState, 
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [roundTimeLeft, myStatus, actionTaken]);
-
-  const handleAction = async (action) => {
-    if (actionTaken || myStatus !== 'playing') return;
-
-    try {
-      const result = await onSubmitMove({ action });
-      setLastResult(result);
-
-      if (action === 'stand' || result.game_state?.total > 21) {
-        setActionTaken(true);
-      }
-
-      onRefresh();
-    } catch (err) {
-      setLastResult({ success: false, message: err.message });
-    }
-  };
+  }, [roundTimeLeft, myStatus, actionTaken, handleAction]);
 
   const myScore = leaderboard.find(p => p.address === playerAddress)?.score || 0;
   const canAct = myStatus === 'playing' && !actionTaken;
