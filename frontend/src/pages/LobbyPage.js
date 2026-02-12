@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { getArenas, getLeaderboard, getAgentStatus, getNetwork, formatMON } from '../services/api';
 import { useWallet } from '../context/WalletContext';
@@ -15,6 +15,7 @@ const LobbyPage = () => {
   const [loading, setLoading] = useState(true);
   const [agentStatus, setAgentStatus] = useState(null);
   const [currentNetworkLabel, setCurrentNetworkLabel] = useState(getNetwork());
+  const firstLoadRef = useRef(true);
   const [stats, setStats] = useState({
     totalArenas: 0,
     totalPlayers: 0,
@@ -23,7 +24,9 @@ const LobbyPage = () => {
 
   const fetchData = useCallback(async () => {
     try {
-      setLoading(true);
+      if (firstLoadRef.current) {
+        setLoading(true);
+      }
       const [arenasData, leaderboardData] = await Promise.all([
         getArenas(),
         getLeaderboard(3),
@@ -48,7 +51,10 @@ const LobbyPage = () => {
     } catch (error) {
       console.error('Failed to fetch data:', error);
     } finally {
-      setLoading(false);
+      if (firstLoadRef.current) {
+        setLoading(false);
+        firstLoadRef.current = false;
+      }
     }
   }, []);
 

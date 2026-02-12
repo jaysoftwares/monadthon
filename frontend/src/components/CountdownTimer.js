@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Clock, Timer } from 'lucide-react';
 
 /**
@@ -21,11 +21,20 @@ const CountdownTimer = ({
   completedText = 'Now',
 }) => {
   const [timeLeft, setTimeLeft] = useState(null);
+  const completedRef = useRef(false);
+  const targetRef = useRef(null);
 
   useEffect(() => {
     if (!targetTime) {
       setTimeLeft(null);
+      completedRef.current = false;
+      targetRef.current = null;
       return;
+    }
+
+    if (targetRef.current !== targetTime) {
+      targetRef.current = targetTime;
+      completedRef.current = false;
     }
 
     const calculateTimeLeft = () => {
@@ -35,7 +44,18 @@ const CountdownTimer = ({
       return diff;
     };
 
-    setTimeLeft(calculateTimeLeft());
+    const notifyCompleteOnce = () => {
+      if (!completedRef.current) {
+        completedRef.current = true;
+        if (onComplete) onComplete();
+      }
+    };
+
+    const initialRemaining = calculateTimeLeft();
+    setTimeLeft(initialRemaining);
+    if (initialRemaining <= 0) {
+      notifyCompleteOnce();
+    }
 
     const interval = setInterval(() => {
       const remaining = calculateTimeLeft();
@@ -43,7 +63,7 @@ const CountdownTimer = ({
 
       if (remaining <= 0) {
         clearInterval(interval);
-        if (onComplete) onComplete();
+        notifyCompleteOnce();
       }
     }, 1000);
 

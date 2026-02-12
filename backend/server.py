@@ -15,6 +15,8 @@ import httpx
 import time
 from web3 import Web3
 from eth_account import Account
+from eth_abi.packed import encode_packed
+from eth_utils import keccak, to_checksum_address
 import asyncio
 
 # Minimal ArenaEscrow ABI for close/finalize
@@ -738,6 +740,50 @@ async def _cancel_and_refund_onchain(arena_address: str, network: str) -> str:
     return tx_hash.hex()
 
 
+def _compute_solidity_array_hash(items: list, solidity_type: str) -> str:
+    if solidity_type == "address":
+        values = [to_checksum_address(v) for v in items]
+    elif solidity_type == "uint256":
+        values = [int(v) for v in items]
+    else:
+        raise ValueError(f"Unsupported solidity_type: {solidity_type}")
+
+    if not values:
+        return "0x" + keccak(b"").hex()
+
+    packed = encode_packed([solidity_type] * len(values), values)
+    return "0x" + keccak(packed).hex()
+
+
+def _sign_finalize_locally(arena_address: str, winners: list, amounts: list, nonce: int, chain_id: int) -> str:
+    acct = _get_operator_account()
+    winners_hash = _compute_solidity_array_hash(winners, "address")
+    amounts_hash = _compute_solidity_array_hash(amounts, "uint256")
+
+    domain = {
+        "name": "ClawArena",
+        "version": "1",
+        "chainId": int(chain_id),
+        "verifyingContract": Web3.to_checksum_address(arena_address),
+    }
+    message = {
+        "arena": Web3.to_checksum_address(arena_address),
+        "winnersHash": winners_hash,
+        "amountsHash": amounts_hash,
+        "nonce": int(nonce),
+    }
+    message_types = {
+        "Finalize": [
+            {"name": "arena", "type": "address"},
+            {"name": "winnersHash", "type": "bytes32"},
+            {"name": "amountsHash", "type": "bytes32"},
+            {"name": "nonce", "type": "uint256"},
+        ]
+    }
+    signed = acct.sign_typed_data(domain_data=domain, message_types=message_types, message_data=message)
+    return "0x" + signed.signature.hex()
+
+
 async def _finalize_onchain(arena_address: str, winners: list, amounts: list, network: str) -> str:
     rpc = _get_rpc_url_for_network(network)
     w3 = Web3(Web3.HTTPProvider(rpc))
@@ -748,7 +794,7 @@ async def _finalize_onchain(arena_address: str, winners: list, amounts: list, ne
     nonce_to_sign = int(used) + 1
 
     chain_id = _get_chain_id_for_network(network)
-    signer_url = os.environ.get("AGENT_SIGNER_URL", "http://localhost:8002").rstrip("/")
+    signer_url = (os.environ.get("AGENT_SIGNER_URL", "") or OPENCLAW_API_URL or "").rstrip("/")
     payload = {
         "arena_address": arena_address,
         "winners": winners,
@@ -757,12 +803,18 @@ async def _finalize_onchain(arena_address: str, winners: list, amounts: list, ne
         "chain_id": chain_id,
     }
 
-    async with httpx.AsyncClient(timeout=20) as http_client:
-        r = await http_client.post(f"{signer_url}/sign", json=payload)
-        r.raise_for_status()
-        sig = r.json().get("signature")
-        if not sig:
-            raise RuntimeError("Signer did not return signature")
+    sig = None
+    if signer_url:
+        try:
+            async with httpx.AsyncClient(timeout=20) as http_client:
+                r = await http_client.post(f"{signer_url}/sign", json=payload)
+                r.raise_for_status()
+                sig = r.json().get("signature")
+        except Exception as e:
+            logger.warning(f"Remote signer unavailable for {arena_address}; falling back to local signing: {e}")
+
+    if not sig:
+        sig = _sign_finalize_locally(arena_address, winners, amounts, nonce_to_sign, chain_id)
 
     txh = _send_contract_tx(
         w3,
@@ -1537,56 +1589,76 @@ async def process_winners(address: str, _: bool = Depends(verify_admin_key)):
 
     if game.status != "finished":
         raise HTTPException(status_code=400, detail=f"Game is {game.status}, not finished")
+    await timer_manager._process_game_winners(address, game_id)
+    updated = await db.arenas.find_one({"address": address}, {"_id": 0})
+    if not updated:
+        raise HTTPException(status_code=500, detail="Arena disappeared during winner processing")
 
-    winners = game.winners if game.winners else []
-    if not winners:
-        raise HTTPException(status_code=400, detail="No winners determined by game engine")
-    payout_winners = winners[:1]
-
-    entry_fee = int(arena.get("entry_fee", "0"))
-    protocol_fee_bps = int(arena.get("protocol_fee_bps", 250))
-    players = arena.get("players", [])
-    player_count = len(players)
-
-    total_pool = entry_fee * player_count
-    protocol_fee = int(total_pool * protocol_fee_bps / 10000)
-    available_for_winners = total_pool - protocol_fee
-    payout_amounts = [str(available_for_winners)]
-
-    await db.arenas.update_one(
-        {"address": address},
-        {
-            "$set": {
-                "winners": payout_winners,
-                "payouts": payout_amounts,
-                "game_results": {
-                    "winners": game.winners,
-                    "payout_winners": payout_winners,
-                    "player_scores": {p.address: p.score for p in game.players.values()},
-                    "total_pool": str(total_pool),
-                    "protocol_fee": str(protocol_fee),
-                    "payout_policy": "winner_takes_all_after_fee",
-                },
-            }
-        },
-    )
-
-    for winner, amount in zip(payout_winners, payout_amounts):
-        payout = PayoutRecord(arena_address=address, winner_address=winner, amount=amount, tx_hash="")
-        await db.payouts.insert_one(payout.model_dump())
-
-    logger.info(f"Processed winners for arena {address}: {payout_winners}")
+    if not updated.get("is_finalized") or not updated.get("tx_hash"):
+        raise HTTPException(status_code=502, detail="Winner processing completed but on-chain finalization did not succeed")
 
     return {
         "success": True,
         "arena_address": address,
-        "winners": payout_winners,
-        "payouts": payout_amounts,
-        "total_pool": str(total_pool),
-        "protocol_fee": str(protocol_fee),
-        "payout_policy": "winner_takes_all_after_fee",
-        "message": "Winners processed successfully",
+        "winners": updated.get("winners", []),
+        "payouts": updated.get("payouts", []),
+        "tx_hash": updated.get("tx_hash"),
+        "message": "Winners processed and finalized on-chain",
     }
+
+
+@api_router.post("/admin/arena/{address}/finalize-now")
+async def finalize_now(address: str, _: bool = Depends(verify_admin_key)):
+    """
+    Force immediate on-chain finalization payout.
+    Used as a recovery path when a finished arena wasn't finalized yet.
+    """
+    arena = await db.arenas.find_one({"address": address})
+    if not arena:
+        raise HTTPException(status_code=404, detail="Arena not found")
+
+    network = arena.get("network", os.environ.get("DEFAULT_NETWORK", "testnet"))
+    existing_tx = arena.get("tx_hash")
+    if arena.get("is_finalized") and existing_tx:
+        # If tx is actually mined, keep current state.
+        try:
+            w3 = Web3(Web3.HTTPProvider(_get_rpc_url_for_network(network)))
+            receipt = w3.eth.get_transaction_receipt(existing_tx)
+            if receipt and getattr(receipt, "status", 0) == 1:
+                return {"success": True, "arena_address": address, "tx_hash": existing_tx, "message": "Already finalized"}
+            logger.warning(f"Arena {address} has non-mined/failed finalize tx {existing_tx}; retrying finalize-now")
+        except Exception:
+            logger.warning(f"Arena {address} has unresolved finalize tx {existing_tx}; retrying finalize-now")
+
+    game_id = arena.get("game_id")
+    if game_id and game_id in game_engine.active_games:
+        game = game_engine.active_games[game_id]
+        if game.status == "finished":
+            await timer_manager._process_game_winners(address, game_id)
+            updated = await db.arenas.find_one({"address": address}, {"_id": 0})
+            if updated and updated.get("is_finalized") and updated.get("tx_hash"):
+                return {"success": True, "arena_address": address, "tx_hash": updated.get("tx_hash"), "message": "Finalized on-chain"}
+
+    winners = arena.get("winners", [])
+    payouts = arena.get("payouts", [])
+    if not winners or not payouts:
+        raise HTTPException(status_code=400, detail="No payout data available to finalize")
+
+    finalize_tx = await _finalize_onchain(address, winners, payouts, network)
+    await db.arenas.update_one(
+        {"address": address},
+        {
+            "$set": {
+                "is_finalized": True,
+                "finalize_tx_hash": finalize_tx,
+                "tx_hash": finalize_tx,
+                "finalized_at": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )
+    await db.payouts.update_many({"arena_address": address}, {"$set": {"tx_hash": finalize_tx}})
+
+    return {"success": True, "arena_address": address, "tx_hash": finalize_tx, "message": "Finalized on-chain"}
 
 
 @api_router.post("/admin/arena/{address}/check-if-full")
@@ -1810,6 +1882,7 @@ async def advance_game_round(address: str, _: bool = Depends(verify_admin_key)):
             {"address": address},
             {"$set": {"game_status": "finished", "game_results": {"winners": game.winners, "player_scores": {p.address: p.score for p in game.players.values()}}}},
         )
+        await timer_manager._process_game_winners(address, game_id)
         logger.info(f"Game {game_id} finished. Winners: {game.winners}")
 
     return {"success": True, "game_id": game_id, "status": game.status, "round": game.round_number}
@@ -1876,6 +1949,7 @@ async def finish_arena_game(address: str, _: bool = Depends(verify_admin_key)):
         {"address": address},
         {"$set": {"game_status": "finished", "game_results": {"winners": game.winners, "player_scores": {p.address: p.score for p in game.players.values()}}}},
     )
+    await timer_manager._process_game_winners(address, game_id)
 
     logger.info(f"Game {game_id} finished manually. Winners: {game.winners}")
 

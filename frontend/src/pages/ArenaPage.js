@@ -12,8 +12,9 @@ import CountdownTimer from '../components/CountdownTimer';
 import GameContainer from '../components/games/GameContainer';
 import {
   ArrowLeft, Users, Coins, Trophy, Clock, ExternalLink,
-  CheckCircle, XCircle, Loader2, Copy, Check, Bot, Timer, Globe, AlertTriangle, Zap
+  CheckCircle, XCircle, Loader2, Copy, Check, Bot, Timer, Globe, AlertTriangle, Zap, PartyPopper
 } from 'lucide-react';
+import confetti from 'canvas-confetti';
 import { toast } from 'sonner';
 
 const ARENA_ESCROW_ABI = [
@@ -82,9 +83,39 @@ const ArenaPage = () => {
 
   // ✅ Keep latest arena in a ref (fixes ESLint exhaustive-deps without changing behavior)
   const arenaRef = useRef(null);
+  const winnerCelebrationKeyRef = useRef(null);
   useEffect(() => {
     arenaRef.current = arena;
   }, [arena]);
+
+  useEffect(() => {
+    if (!arena?.is_finalized || !walletAddress) return;
+    if (!Array.isArray(arena.winners) || !arena.winners.includes(walletAddress)) return;
+
+    const celebrationKey = `${arena.address}:${arena.tx_hash || arena.finalized_at || ''}`;
+    if (winnerCelebrationKeyRef.current === celebrationKey) return;
+    winnerCelebrationKeyRef.current = celebrationKey;
+
+    const end = Date.now() + 2600;
+    const frame = () => {
+      confetti({
+        particleCount: 3,
+        angle: 60,
+        spread: 60,
+        origin: { x: 0 },
+        colors: ['#FFD700', '#FFA500', '#7C6DFB'],
+      });
+      confetti({
+        particleCount: 3,
+        angle: 120,
+        spread: 60,
+        origin: { x: 1 },
+        colors: ['#FFD700', '#FFA500', '#7C6DFB'],
+      });
+      if (Date.now() < end) requestAnimationFrame(frame);
+    };
+    frame();
+  }, [arena?.is_finalized, arena?.address, arena?.tx_hash, arena?.finalized_at, arena?.winners, walletAddress]);
 
   // Fetch arena and game state
   useEffect(() => {
@@ -339,6 +370,9 @@ useEffect(() => {
   }
 
   const playerCount = arena.players?.length || 0;
+  const isWalletWinner = !!(arena?.is_finalized && walletAddress && arena?.winners?.includes(walletAddress));
+  const walletWinnerIndex = isWalletWinner ? arena.winners.indexOf(walletAddress) : -1;
+  const walletWinnerPayout = walletWinnerIndex >= 0 ? arena?.payouts?.[walletWinnerIndex] : null;
   const prizePool = BigInt(arena.entry_fee || '0') * BigInt(playerCount);
   const protocolFee = (prizePool * BigInt(arena.protocol_fee_bps || 250)) / BigInt(10000);
   const netPrizePool = prizePool - protocolFee;
@@ -466,6 +500,19 @@ useEffect(() => {
                 <p className="text-purple-100 text-sm">Get ready!</p>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Winner Announcement (restored) */}
+        {isWalletWinner && (
+          <div className="mb-8 bg-gradient-to-r from-yellow-50 to-orange-50 rounded-2xl p-6 border border-yellow-200">
+            <div className="flex items-center gap-3 mb-2">
+              <PartyPopper className="w-6 h-6 text-yellow-600" />
+              <h3 className="font-heading text-2xl font-bold text-yellow-700">Winner!</h3>
+            </div>
+            <p className="text-yellow-800 font-medium">
+              Congratulations, you won {walletWinnerPayout ? `${formatMON(walletWinnerPayout)} MON` : 'this tournament'}.
+            </p>
           </div>
         )}
 

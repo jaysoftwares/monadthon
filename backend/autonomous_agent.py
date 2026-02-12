@@ -764,68 +764,23 @@ class AutonomousAgent:
                 continue
 
             address = arena.get('address')
-            game_type_str = arena.get('game_type', 'prediction')
             logger.info(f"Arena {address[:10]}... is ready for finalization")
-            logger.info(f"   Game type: {game_type_str}")
-
-            # Get game results from the game engine
-            game_id = arena.get('game_id')
-            if game_id and game_id in self.game_engine.active_games:
-                # Use actual game results
-                game_state = self.game_engine.finish_game(game_id)
-                if game_state and game_state.winners:
-                    winners = game_state.winners[:1]
-                    logger.info(f"   Game finished! Winners determined by gameplay.")
-                else:
-                    # Fallback if game state is incomplete
-                    winners = random.sample(players, min(1, len(players)))
-                    logger.info(f"   Using fallback winner selection.")
-            else:
-                # No active game session - winners determined by game that was played
-                # Check for stored game results
-                game_results = arena.get('game_results', {})
-                if game_results.get('winners'):
-                    winners = game_results['winners'][:1]
-                    logger.info(f"   Using stored game results.")
-                else:
-                    # Fallback: random selection (shouldn't happen in production)
-                    winners = random.sample(players, min(1, len(players)))
-                    logger.info(f"   No game results found, using fallback.")
-
-            # Calculate prize distribution
-            total_pool = int(arena.get('entry_fee', '0')) * len(players)
-            protocol_fee = total_pool * arena.get('protocol_fee_bps', 250) // 10000
-            prize_pool = total_pool - protocol_fee
-
-            # Winner-takes-all policy after protocol fee.
-            amounts = [str(prize_pool)]
-
-            logger.info(f"   Winners: {[w[:10] + '...' for w in winners]}")
-            logger.info(f"   Prizes: {[f'{int(a)/1e18:.4f} MON' for a in amounts]}")
-
-            # Request finalization from backend
-            await self._request_finalization(address, winners, amounts)
+            # Backend performs on-chain finalize directly (no mock tx path).
+            await self._request_finalization(address)
 
     async def _request_finalization(
         self,
         arena_address: str,
-        winners: List[str],
-        amounts: List[str],
     ):
-        """Request the backend to finalize a tournament"""
+        """Request backend to force immediate on-chain finalization payout."""
         try:
-            mock_tx_hash = "0x" + hashlib.sha256(f"{arena_address}{time.time()}".encode()).hexdigest()
             response = await self.http_client.post(
-                f"{BACKEND_API_URL}/api/admin/arena/{arena_address}/finalize",
+                f"{BACKEND_API_URL}/api/admin/arena/{arena_address}/finalize-now",
                 headers={"X-Admin-Key": ADMIN_API_KEY},
-                json={
-                    "tx_hash": mock_tx_hash,
-                    "winners": winners,
-                    "amounts": amounts,
-                }
             )
             if response.status_code == 200:
-                logger.info(f"   Finalization requested successfully")
+                tx_hash = response.json().get("tx_hash", "")
+                logger.info(f"   Finalization requested successfully. tx={tx_hash[:10]}...")
             else:
                 logger.warning(f"   Finalization request failed: {response.status_code}")
         except Exception as e:

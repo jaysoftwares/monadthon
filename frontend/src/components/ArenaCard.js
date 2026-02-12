@@ -10,6 +10,7 @@ const ArenaCard = ({ arena }) => {
   const isMainnet = arena.network === 'mainnet';
   const playerCount = arena.players?.length || 0;
   const spotsLeft = arena.max_players - playerCount;
+  const isEnded = arena.game_status === 'finished' && !arena.is_finalized;
 
   // 1. Logic for showing the 1-minute refund timer
   const isWaitingForPlayers = playerCount === 1 && !arena.is_closed && !arena.is_finalized;
@@ -152,7 +153,7 @@ const ArenaCard = ({ arena }) => {
           }`}
           data-testid={`view-arena-btn-${arena.address}`}
         >
-          {arena.is_finalized ? 'View Results' : arena.is_closed ? 'In Progress' : 'Join Arena'}
+          {arena.is_finalized ? 'View Results' : isEnded ? 'Ended' : arena.is_closed ? 'In Progress' : 'Join Arena'}
           <ArrowRight className="w-4 h-4" />
         </Button>
       </Link>
