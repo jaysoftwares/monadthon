@@ -20,13 +20,25 @@ const NETWORK_CONFIG = {
   },
 };
 
-// Current network - can be updated by the app
-let currentNetwork = 'testnet';
+// Persist network selection across page reloads
+const NETWORK_STORAGE_KEY = 'claw_arena_network';
 
-// Set the current network
+// Read persisted network on init (falls back to 'testnet')
+let currentNetwork = (() => {
+  try {
+    const stored = localStorage.getItem(NETWORK_STORAGE_KEY);
+    if (stored && NETWORK_CONFIG[stored]) return stored;
+  } catch (_) { /* localStorage unavailable */ }
+  return 'testnet';
+})();
+
+// Set the current network and persist to localStorage
 export const setNetwork = (network) => {
   if (NETWORK_CONFIG[network]) {
     currentNetwork = network;
+    try {
+      localStorage.setItem(NETWORK_STORAGE_KEY, network);
+    } catch (_) { /* localStorage unavailable */ }
   }
 };
 

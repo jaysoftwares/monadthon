@@ -502,28 +502,32 @@ class ArenaTimerManager:
                 logger.info(f"Deleted arena {arena_address} with 1 player, refunded {player_address}")
 
             elif player_count >= 2:
-                game_type_str = arena.get("game_type", "prediction")
-                try:
-                    game_type = GameType(game_type_str)
-                except ValueError:
-                    game_type = GameType.PREDICTION
-
-                game = game_engine.create_game(arena_address=arena_address, game_type=game_type, players=players)
-
-                game_engine.start_game(game.game_id)
-
+                # Close registration first
                 await db.arenas.update_one(
                     {"address": arena_address},
                     {
                         "$set": {
-                            "game_id": game.game_id,
-                            "game_status": "active",
-                            "game_start": datetime.now(timezone.utc).isoformat(),
+                            "is_closed": True,
+                            "closed_at": datetime.now(timezone.utc).isoformat(),
                         }
                     },
                 )
 
-                logger.info(f"Started game immediately for arena {arena_address} after idle timeout")
+                # Try to close registration on-chain
+                try:
+                    network = arena.get("network", DEFAULT_NETWORK)
+                    close_tx = await _close_registration_onchain(arena_address, network)
+                    await db.arenas.update_one(
+                        {"address": arena_address},
+                        {"$set": {"close_tx_hash": close_tx}},
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to close registration on-chain for idle timer arena {arena_address}: {e}")
+
+                logger.info(f"Closed registration for arena {arena_address} after idle timeout with {player_count} players, starting game")
+
+                # Use the same game-start flow as full arenas (creates game, plays to completion, processes winners)
+                await self._trigger_game_start(arena_address)
 
         except Exception as e:
             logger.error(f"Error handling idle expiration for arena {arena_address}: {e}")
@@ -1113,6 +1117,13 @@ async def join_arena(join_data: JoinArena):
         response["countdown_starts"] = True
         response["countdown_seconds"] = 10
         logger.info(f"Arena {join_data.arena_address} is now full, starting game countdown")
+
+    elif len(players) >= 2 and not updated_arena.get("is_closed"):
+        # 2+ players but not full – reset idle timer to give time for more players
+        await timer_manager.start_idle_timer(join_data.arena_address, idle_seconds=20)
+        response["idle_timer_reset"] = True
+        response["idle_seconds"] = 20
+        logger.info(f"Arena {join_data.arena_address} has {len(players)} player(s), idle timer reset")
 
     elif len(players) <= 1 and not updated_arena.get("is_closed"):
         await timer_manager.start_idle_timer(join_data.arena_address, idle_seconds=20)

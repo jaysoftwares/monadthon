@@ -68,24 +68,32 @@ const ArenaPage = () => {
   // If you later want to use it, you can:
   // const receipt = useWaitForTransactionReceipt({ hash: pendingTx, query: { enabled: !!pendingTx } });
 
+  // Track whether the arena was deleted (e.g. by idle timer refund)
+  const [arenaDeleted, setArenaDeleted] = useState(false);
+
   // Fetch arena and game state
   useEffect(() => {
+    let stopped = false;
+
     const fetchData = async () => {
+      if (stopped) return;
       try {
         const data = await getArena(address);
+        if (stopped) return;
         setArena(data);
+        setArenaDeleted(false);
 
         // If game is active, fetch game state and rules
         if (data.game_id && (data.game_status === 'active' || data.game_status === 'learning')) {
           try {
             const gs = await getGameState(address);
-            setGameState(gs);
+            if (!stopped) setGameState(gs);
 
             // Fetch game rules if we don't have them
             if (data.game_type && !gameRules) {
               try {
                 const rules = await getGameRules(data.game_type);
-                setGameRules(rules);
+                if (!stopped) setGameRules(rules);
               } catch (e) {
                 console.error('Failed to fetch game rules:', e);
               }
@@ -95,18 +103,32 @@ const ArenaPage = () => {
           }
         }
       } catch (error) {
-        console.error('Failed to fetch arena:', error);
-        toast.error('Failed to load arena');
+        if (stopped) return;
+        // If the arena was previously loaded but now returns 404,
+        // it was likely deleted by the idle timer (player refunded).
+        if (error?.response?.status === 404 && arena) {
+          setArenaDeleted(true);
+          return; // Stop polling – arena no longer exists
+        }
+        if (!arena) {
+          // First load failed
+          console.error('Failed to fetch arena:', error);
+        }
       } finally {
-        setLoading(false);
+        if (!stopped) setLoading(false);
       }
     };
 
     fetchData();
-    // Refresh more frequently when game is active or countdown is running
-    const interval = setInterval(fetchData, 2000); // Refresh every 2s
-    return () => clearInterval(interval);
-  }, [address, gameRules]);
+    // Refresh every 2s; stop polling if arena was deleted
+    const interval = setInterval(() => {
+      if (!arenaDeleted) fetchData();
+    }, 2000);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, [address, gameRules, arenaDeleted]);
 
   // Handle game countdown
   useEffect(() => {
@@ -217,6 +239,24 @@ const ArenaPage = () => {
             </div>
             <Skeleton className="h-40" />
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (arenaDeleted) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center max-w-md px-4">
+          <Clock className="w-16 h-16 text-orange-400 mx-auto mb-4" />
+          <h2 className="font-heading text-2xl font-bold text-gray-900 mb-2">Tournament Cancelled</h2>
+          <p className="text-gray-500 mb-6">
+            This arena was closed because not enough players joined before the timer expired.
+            Your entry fee will be refunded.
+          </p>
+          <Link to="/">
+            <Button className="btn-primary">Back to Lobby</Button>
+          </Link>
         </div>
       </div>
     );

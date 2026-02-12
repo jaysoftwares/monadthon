@@ -43,6 +43,8 @@ export const WalletProvider = ({ children }) => {
       const network = getNetworkFromChainId(chainId);
       if (network) {
         setNetwork(network);
+        // Notify pages so they refetch data for the correct network
+        window.dispatchEvent(new CustomEvent('network-changed'));
       }
     } else {
       setWrongNetwork(false);
