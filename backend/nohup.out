@@ -1,0 +1,59 @@
+INFO:     Started server process [87009]
+INFO:     Waiting for application startup.
+INFO:server:==================================================
+INFO:server:CLAW ARENA API Starting
+INFO:server:Default Network: mainnet
+INFO:server:OpenClaw Configured: False
+INFO:server:Operator Address: 0xF0F735F8600cc26A92De70B0eD1B7092747b84b4
+INFO:server:TESTNET - Chain ID: 10143
+INFO:server:TESTNET - Arena Factory: 0x541ADEcBaD3386f8cB6366967D65a67aeb02A065
+INFO:server:TESTNET - Treasury: 0xF0F735F8600cc26A92De70B0eD1B7092747b84b4
+INFO:server:MAINNET - Chain ID: 143
+INFO:server:MAINNET - Arena Factory: 0xEd714A011F3CDF02D223b2397787EAa7EEdac62D
+INFO:server:MAINNET - Treasury: 0xF0F735F8600cc26A92De70B0eD1B7092747b84b4
+INFO:server:==================================================
+INFO:user_agents:User Agent Manager started
+INFO:user_agents:Started agent c161f699bc7d659d
+INFO:server:User Agent Manager initialized
+INFO:server:Arena Timer Manager started
+INFO:user_agents:Agent c161f699bc7d659d loop started
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:43502 - "GET /api/arenas HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: GET http://localhost:8000/api/arenas "HTTP/1.1 200 OK"
+INFO:     102.89.23.98:0 - "GET /api/agent/status?network=mainnet HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:user_agents:Agent c161f699bc7d659d loop cancelled
+INFO:user_agents:User Agent Manager stopped
+INFO:server:User Agent Manager stopped
+INFO:server:Arena Timer Manager stopped
+INFO:     Application shutdown complete.
+INFO:     Finished server process [87009]
+INFO:     Started server process [87056]
+INFO:     Waiting for application startup.
+INFO:server:==================================================
+INFO:server:CLAW ARENA API Starting
+INFO:server:Default Network: mainnet
+INFO:server:OpenClaw Configured: False
+INFO:server:Operator Address: 0xF0F735F8600cc26A92De70B0eD1B7092747b84b4
+INFO:server:TESTNET - Chain ID: 10143
+INFO:server:TESTNET - Arena Factory: 0x541ADEcBaD3386f8cB6366967D65a67aeb02A065
+INFO:server:TESTNET - Treasury: 0xF0F735F8600cc26A92De70B0eD1B7092747b84b4
+INFO:server:MAINNET - Chain ID: 143
+INFO:server:MAINNET - Arena Factory: 0xEd714A011F3CDF02D223b2397787EAa7EEdac62D
+INFO:server:MAINNET - Treasury: 0xF0F735F8600cc26A92De70B0eD1B7092747b84b4
+INFO:server:==================================================
+INFO:user_agents:User Agent Manager started
+INFO:user_agents:Started agent c161f699bc7d659d
+INFO:server:User Agent Manager initialized
+INFO:server:Arena Timer Manager started
+INFO:user_agents:Agent c161f699bc7d659d loop started
+INFO:     Application startup complete.
+ERROR:    [Errno 98] error while attempting to bind on address ('0.0.0.0', 8000): address already in use
+INFO:     Waiting for application shutdown.
+INFO:user_agents:User Agent Manager stopped
+INFO:server:User Agent Manager stopped
+INFO:user_agents:Agent c161f699bc7d659d loop cancelled
+INFO:server:Arena Timer Manager stopped
+INFO:     Application shutdown complete.
