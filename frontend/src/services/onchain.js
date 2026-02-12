@@ -45,12 +45,18 @@ export async function joinArenaOnchain({ arenaAddress }) {
   }
 
   // Pre-flight simulation (this is where you’ll get the REAL revert reason)
-  await simulateContract(wagmiConfig, {
-    address: arenaAddress,
-    abi: ARENA_ESCROW_JOIN_ABI,
-    functionName: 'join',
-    value: entryFee,
-  });
+  try {
+    await simulateContract(wagmiConfig, {
+      address: arenaAddress,
+      abi: ARENA_ESCROW_JOIN_ABI,
+      functionName: 'join',
+      value: entryFee,
+    });
+  } catch (error) {
+    console.error(Simulation failed before writing:, error);
+    const revertReason = error.shortMessage || error.message || 'Unknown contract error during simulation.';
+    throw new Error(`Pre-check failed: ${revertReason}`);
+  }
 
   const hash = await writeContract(wagmiConfig, {
     address: arenaAddress,
