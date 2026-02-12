@@ -184,47 +184,60 @@ useEffect(() => {
   return () => clearInterval(t);
 }, [arena?.idle_ends_at, arena?.is_closed, arena?.is_finalized]);
 
-const handleJoin = async () => {
-    if (!isConnected) {
-      await connect();
-      return;
-    }
-    if (!arena?.address) {
-      toast.error('Arena not loaded yet');
-      return;
-    }
 
-    setJoining(true);
+ const handleJoin = async () => {
+  if (!isConnected) {
+    await connect();
+    return;
+  } 
+  
+  setJoining(true);
+  const toastId = toast.loading('Preparing transaction...');
+
+  try {
+    // 1. Determine the value. 
+    // If your API returns Wei (e.g., "100000000000000000"), use BigInt.
+    // If your API returns Ether (e.g., "0.1"), use parseEther.
+    const entryFeeWei = arena.entry_fee.toString().includes('.') 
+      ? parseEther(arena.entry_fee.toString()) 
+      : BigInt(arena.entry_fee);
+
+    // 2. Trigger the contract write
+    // This is where it was likely failing during "Gas Estimation"
+    const hash = await writeContractAsync({
+      address: arena.address, // Ensure this is the Escrow address, not the Factory
+      abi: ARENA_ESCROW_ABI,
+      functionName: 'join',
+      value: entryFeeWei,
+    });
+
+    setPendingTx(hash);
+    toast.success('Transaction submitted!', { id: toastId });
+
+    // 3. Notify backend
     try {
-      // 1) Send on-chain join transaction (escrow funding)
-      const value = BigInt(arena.entry_fee); // already wei string
-      const hash = await writeContractAsync({
-        address: arena.address,
-        abi: ARENA_ESCROW_ABI,
-        functionName: 'join',
-        value,
-      });
-
-      setPendingTx(hash);
-
-      // 2) Wait briefly for confirmation (backend expects a real tx hash)
-      toast.message('Transaction submitted', { description: hash });
-
-      // 3) Record join in backend (after tx submission; backend can optionally verify on-chain)
       await joinArena(address, walletAddress, hash);
-      toast.success('Successfully joined arena!');
-
-      // Refresh arena state
-      const updated = await getArena(address);
-      setArena(updated);
-    } catch (err) {
-      console.error(err);
-      toast.error(err?.shortMessage || err?.message || 'Failed to join arena');
-    } finally {
-      setJoining(false);
+    } catch (apiErr) {
+      console.error("Backend update failed, but tx is on-chain:", apiErr);
+      // Don't throw here, the user already paid!
     }
-  };
 
+  } catch (err) {
+    console.error("Join Error Details:", err);
+    
+    // Check if it's a specific smart contract revert
+    const errorMessage = err.cause?.message || err.shortMessage || err.message;
+    
+    toast.error('Failed to join', {
+      id: toastId,
+      description: errorMessage.includes('user rejected') 
+        ? 'User denied transaction' 
+        : errorMessage
+    });
+  } finally {
+    setJoining(false);
+  }
+};
   const copyAddress = () => {
     navigator.clipboard.writeText(address);
     setCopied(true);
