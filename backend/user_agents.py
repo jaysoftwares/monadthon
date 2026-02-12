@@ -402,10 +402,10 @@ class UserAgentManager:
             # use the owner's wallet to sign the transaction
             response = await self.http_client.post(
                 f"{self.api_base}/api/arenas/{arena_address}/join-agent",
-                json={
+                params={
                     "agent_id": agent.agent_id,
                     "owner_address": agent.owner_address,
-                }
+                },
             )
 
             if response.status_code == 200:
@@ -437,7 +437,7 @@ class UserAgentManager:
             game_started = False
             for _ in range(60):  # Wait up to 5 minutes
                 response = await self.http_client.get(
-                    f"{self.api_base}/arenas/{arena_address}/game"
+                    f"{self.api_base}/api/arenas/{arena_address}/game"
                 )
                 if response.status_code == 200:
                     game_state = response.json()
@@ -479,7 +479,7 @@ class UserAgentManager:
         while True:
             # Get current game state
             response = await self.http_client.get(
-                f"{self.api_base}/arenas/{arena_address}/game"
+                f"{self.api_base}/api/arenas/{arena_address}/game"
             )
             if response.status_code != 200:
                 break
@@ -510,10 +510,11 @@ class UserAgentManager:
 
             # Submit move
             await self.http_client.post(
-                f"{self.api_base}/arenas/{arena_address}/game/move",
+                f"{self.api_base}/api/arenas/{arena_address}/game/move",
                 json={
+                    "arena_address": arena_address,
                     "player_address": agent_address,
-                    "action": action,
+                    "move_data": {"action": action},
                 }
             )
 
@@ -549,7 +550,7 @@ class UserAgentManager:
 
         for _ in range(5):  # 5 attempts
             response = await self.http_client.get(
-                f"{self.api_base}/arenas/{arena_address}/game"
+                f"{self.api_base}/api/arenas/{arena_address}/game"
             )
             if response.status_code != 200:
                 break
@@ -581,12 +582,15 @@ class UserAgentManager:
                 y = target.get('y', y)
 
             await self.http_client.post(
-                f"{self.api_base}/arenas/{arena_address}/game/move",
+                f"{self.api_base}/api/arenas/{arena_address}/game/move",
                 json={
+                    "arena_address": arena_address,
                     "player_address": agent_address,
-                    "x": x,
-                    "y": y,
-                    "prize_id": target.get('id') if available_prizes else None,
+                    "move_data": {
+                        "x": x,
+                        "y": y,
+                        "prize_id": target.get('id') if available_prizes else None,
+                    },
                 }
             )
 
@@ -598,7 +602,7 @@ class UserAgentManager:
 
         for round_num in range(3):  # 3 rounds
             response = await self.http_client.get(
-                f"{self.api_base}/arenas/{arena_address}/game"
+                f"{self.api_base}/api/arenas/{arena_address}/game"
             )
             if response.status_code != 200:
                 break
@@ -622,10 +626,11 @@ class UserAgentManager:
                 prediction = random.randint(min_val, max_val)
 
             await self.http_client.post(
-                f"{self.api_base}/arenas/{arena_address}/game/move",
+                f"{self.api_base}/api/arenas/{arena_address}/game/move",
                 json={
+                    "arena_address": arena_address,
                     "player_address": agent_address,
-                    "prediction": prediction,
+                    "move_data": {"prediction": prediction},
                 }
             )
 
@@ -637,7 +642,7 @@ class UserAgentManager:
 
         for _ in range(10):  # 10 challenges
             response = await self.http_client.get(
-                f"{self.api_base}/arenas/{arena_address}/game"
+                f"{self.api_base}/api/arenas/{arena_address}/game"
             )
             if response.status_code != 200:
                 break
@@ -668,11 +673,14 @@ class UserAgentManager:
             await asyncio.sleep(response_time / 1000)
 
             await self.http_client.post(
-                f"{self.api_base}/arenas/{arena_address}/game/move",
+                f"{self.api_base}/api/arenas/{arena_address}/game/move",
                 json={
+                    "arena_address": arena_address,
                     "player_address": agent_address,
-                    "answer": answer,
-                    "response_time_ms": response_time,
+                    "move_data": {
+                        "answer": answer,
+                        "response_time_ms": response_time,
+                    },
                 }
             )
 
@@ -694,12 +702,13 @@ class UserAgentManager:
 
             # Get final results
             response = await self.http_client.get(
-                f"{self.api_base}/arenas/{arena_address}/game/leaderboard"
+                f"{self.api_base}/api/arenas/{arena_address}/game/leaderboard"
             )
             if response.status_code != 200:
                 return
 
-            leaderboard = response.json()
+            leaderboard_payload = response.json()
+            leaderboard = leaderboard_payload.get("leaderboard", [])
             agent_address = f"agent_{agent.agent_id}"
 
             # Find agent's result
@@ -710,7 +719,10 @@ class UserAgentManager:
                     break
 
             # Calculate earnings (simplified)
-            entry_fee = int(agent.current_game_id or '0')  # Would need actual fee
+            arena_response = await self.http_client.get(f"{self.api_base}/api/arenas/{arena_address}")
+            entry_fee = 0
+            if arena_response.status_code == 200:
+                entry_fee = int(arena_response.json().get("entry_fee", "0"))
             earnings = 0
             if rank == 1:
                 earnings = int(entry_fee * 1.7)  # 70% of pool

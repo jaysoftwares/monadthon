@@ -13,7 +13,8 @@ const ArenaCard = ({ arena }) => {
 
   // 1. Logic for showing the 1-minute refund timer
   const isWaitingForPlayers = playerCount === 1 && !arena.is_closed && !arena.is_finalized;
-  const hasIdleTimeout = !!arena.idle_ends_at;
+  const registrationEndsAt = arena.registration_deadline || arena.idle_ends_at;
+  const hasIdleTimeout = !!registrationEndsAt;
 
   const getStatusBadge = () => {
     if (arena.is_finalized) {
@@ -82,10 +83,10 @@ const ArenaCard = ({ arena }) => {
         <div className="flex items-center gap-2 bg-orange-50 border border-orange-100 rounded-lg p-3 mb-4 animate-in fade-in slide-in-from-top-1">
           <AlertCircle className="w-4 h-4 text-orange-500 shrink-0" />
           <div className="flex-1">
-            <p className="text-[10px] text-orange-700 font-medium uppercase tracking-tight">Refund Countdown</p>
+            <p className="text-[10px] text-orange-700 font-medium uppercase tracking-tight">Registration Countdown</p>
             <div className="flex items-center justify-between">
-              <span className="text-xs text-orange-600">Resetting in:</span>
-              <CountdownTimer targetTime={arena.idle_ends_at} variant="inline" className="text-orange-700 font-bold" />
+              <span className="text-xs text-orange-600">Closes in:</span>
+              <CountdownTimer targetTime={registrationEndsAt} variant="inline" className="text-orange-700 font-bold" />
             </div>
           </div>
         </div>

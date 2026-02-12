@@ -150,12 +150,10 @@ export const requestFinalizeSignature = async (arenaAddress, winners, amounts) =
 };
 
 export const recordFinalize = async (address, txHash, winners, amounts) => {
-  const response = await adminClient.post(`/admin/arena/${address}/finalize`, null, {
-    params: withNetwork({
-      tx_hash: txHash,
-      winners: winners.join(','),
-      amounts: amounts.join(','),
-    }),
+  const response = await adminClient.post(`/admin/arena/${address}/finalize`, {
+    tx_hash: txHash,
+    winners,
+    amounts,
   });
   return response.data;
 };
@@ -181,9 +179,14 @@ export const getGameLeaderboard = async (arenaAddress) => {
   return response.data;
 };
 
-export const submitGameMove = async (arenaAddress, move) => {
+export const submitGameMove = async (arenaAddress, move, playerAddress = null) => {
+  const resolvedPlayerAddress = playerAddress || move?.player_address;
+  if (!resolvedPlayerAddress) {
+    throw new Error('player_address is required to submit a game move');
+  }
   const response = await apiClient.post(`/arenas/${arenaAddress}/game/move`, {
     arena_address: arenaAddress,
+    player_address: resolvedPlayerAddress,
     move_data: move,
   });
   return response.data;
@@ -191,22 +194,22 @@ export const submitGameMove = async (arenaAddress, move) => {
 
 // Admin game endpoints
 export const startArenaGame = async (address) => {
-  const response = await adminClient.post(`/admin/arenas/${address}/game/start`, null);
+  const response = await adminClient.post(`/arenas/${address}/game/start`, null);
   return response.data;
 };
 
 export const activateArenaGame = async (address) => {
-  const response = await adminClient.post(`/admin/arenas/${address}/game/activate`, null);
+  const response = await adminClient.post(`/arenas/${address}/game/activate`, null);
   return response.data;
 };
 
 export const advanceGameRound = async (address) => {
-  const response = await adminClient.post(`/admin/arenas/${address}/game/advance-round`, null);
+  const response = await adminClient.post(`/arenas/${address}/game/advance-round`, null);
   return response.data;
 };
 
 export const finishArenaGame = async (address) => {
-  const response = await adminClient.post(`/admin/arenas/${address}/game/finish`, null);
+  const response = await adminClient.post(`/arenas/${address}/game/finish`, null);
   return response.data;
 };
 

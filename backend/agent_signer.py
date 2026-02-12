@@ -17,11 +17,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
 import os
-import hashlib
 from eth_utils import keccak, to_checksum_address
 from eth_abi.packed import encode_packed
 from eth_account import Account
-from eth_account.messages import encode_typed_data
 import logging
 from dotenv import load_dotenv
 
@@ -64,10 +62,24 @@ class SignFinalizeResponse(BaseModel):
 
 # ============ HELPERS ============
 
-def compute_hash(items: List[str]) -> str:
-    """Compute SHA256 hash of comma-separated items"""
-    data = ",".join(items).encode()
-    return "0x" + hashlib.sha256(data).hexdigest()
+def compute_hash(items: List[str], solidity_type: str) -> str:
+    """
+    Compute keccak256(abi.encodePacked(...)) compatible with Solidity:
+    - addresses: keccak256(abi.encodePacked(address[]))
+    - uint256:   keccak256(abi.encodePacked(uint256[]))
+    """
+    if solidity_type == "address":
+        values = [to_checksum_address(v) for v in items]
+    elif solidity_type == "uint256":
+        values = [int(v) for v in items]
+    else:
+        raise ValueError(f"Unsupported solidity_type: {solidity_type}")
+
+    if not values:
+        return "0x" + keccak(b"").hex()
+
+    packed = encode_packed([solidity_type] * len(values), values)
+    return "0x" + keccak(packed).hex()
 
 def sign_finalize_eip712(
     arena_address: str,

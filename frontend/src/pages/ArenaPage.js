@@ -3,11 +3,13 @@ import { useParams, Link } from 'react-router-dom';
 import { getArena, joinArena, formatMON, getExplorerUrl, getGameState, getGameRules } from '../services/api';
 import { useWallet } from '../context/WalletContext';
 import { useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { parseEther } from 'viem';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 
 import { Skeleton } from '../components/ui/skeleton';
 import CountdownTimer from '../components/CountdownTimer';
+import GameContainer from '../components/games/GameContainer';
 import {
   ArrowLeft, Users, Coins, Trophy, Clock, ExternalLink,
   CheckCircle, XCircle, Loader2, Copy, Check, Bot, Timer, Globe, AlertTriangle, Zap
@@ -30,7 +32,7 @@ const ArenaPage = () => {
   const [showHowToPlay, setShowHowToPlay] = useState(false);
   const [gameCountdown, setGameCountdown] = useState(null);
   const [idleCountdown, setIdleCountdown] = useState(null);
-  const [gameStartTime, setGameStartTime] = useState(null);
+  const [learningModalShownForGame, setLearningModalShownForGame] = useState(null);
 
   // ✅ MISSING STATE (you call setPendingTx but never defined it)
   const [pendingTx, setPendingTx] = useState(null);
@@ -71,6 +73,12 @@ const ArenaPage = () => {
 
   // Track whether the arena was deleted (e.g. by idle timer refund)
   const [arenaDeleted, setArenaDeleted] = useState(false);
+  const hasJoined = !!arena?.players?.includes(walletAddress);
+  const canJoin = !!(arena &&
+    !arena.is_closed &&
+    !arena.is_finalized &&
+    arena.players?.length < arena.max_players &&
+    !arena.players?.includes(walletAddress));
 
   // ✅ Keep latest arena in a ref (fixes ESLint exhaustive-deps without changing behavior)
   const arenaRef = useRef(null);
@@ -142,12 +150,18 @@ const ArenaPage = () => {
   // Handle game countdown
   useEffect(() => {
     if (!arena?.is_closed || arena?.game_status !== 'waiting') {
+      setGameCountdown(null);
       return;
     }
 
-    // Calculate time until game starts (10 seconds after arena closes)
-    const closedTime = new Date(arena.closed_at);
-    const gameStartEstimate = new Date(closedTime.getTime() + 10000); // 10 seconds
+    const gameStartEstimate = arena?.countdown_ends_at
+      ? new Date(arena.countdown_ends_at)
+      : (arena?.closed_at ? new Date(new Date(arena.closed_at).getTime() + 10000) : null);
+
+    if (!gameStartEstimate || Number.isNaN(gameStartEstimate.getTime())) {
+      setGameCountdown(null);
+      return;
+    }
 
     const updateCountdown = () => {
       const now = new Date();
@@ -161,9 +175,9 @@ const ArenaPage = () => {
     };
 
     updateCountdown();
-    const timer = setInterval(updateCountdown, 100);
+    const timer = setInterval(updateCountdown, 250);
     return () => clearInterval(timer);
-  }, [arena?.is_closed, arena?.game_status, arena?.closed_at]);
+  }, [arena?.is_closed, arena?.game_status, arena?.closed_at, arena?.countdown_ends_at]);
 
   
 
@@ -183,6 +197,17 @@ useEffect(() => {
   const t = setInterval(updateIdleCountdown, 250);
   return () => clearInterval(t);
 }, [arena?.idle_ends_at, arena?.is_closed, arena?.is_finalized]);
+
+  useEffect(() => {
+    if (!arena || !gameRules) return;
+    if (!hasJoined || arena.game_status !== 'learning') return;
+
+    const learningKey = `${address}:${arena.game_id || 'pending'}`;
+    if (learningModalShownForGame !== learningKey) {
+      setShowHowToPlay(true);
+      setLearningModalShownForGame(learningKey);
+    }
+  }, [arena, gameRules, hasJoined, learningModalShownForGame, address]);
 
 
  const handleJoin = async () => {
@@ -256,14 +281,6 @@ useEffect(() => {
     }
     return <Badge className="badge-open text-base px-4 py-1">Open for Registration</Badge>;
   };
-
-  const canJoin = arena && 
-    !arena.is_closed && 
-    !arena.is_finalized && 
-    arena.players?.length < arena.max_players &&
-    !arena.players?.includes(walletAddress);
-
-  const hasJoined = arena?.players?.includes(walletAddress);
 
   if (loading) {
     return (
@@ -449,53 +466,14 @@ useEffect(() => {
           </div>
         )}
 
-        {/* Game Active Display */}
-        {arena?.game_status === 'active' && gameState && (
-          <div className="mb-8 bg-white rounded-2xl border-2 border-green-400 shadow-lg overflow-hidden">
-            <div className="p-6 bg-gradient-to-r from-green-50 to-emerald-50 border-b border-green-200">
-              <h3 className="font-heading text-2xl font-bold text-gray-900 flex items-center gap-2">
-                <Zap className="w-6 h-6 text-green-600" />
-                Game in Progress
-              </h3>
-              <p className="text-gray-600 mt-1">
-                Round {gameState.round_number} • {gameState.time_remaining_seconds}s remaining
-              </p>
-            </div>
-
-            {gameState.leaderboard && gameState.leaderboard.length > 0 && (
-              <div className="p-6">
-                <h4 className="font-heading font-semibold text-gray-900 mb-4">Current Scores</h4>
-                <div className="space-y-3">
-                  {gameState.leaderboard.slice(0, 5).map((player, idx) => (
-                    <div key={player.address} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                      <div className="flex items-center gap-3">
-                        <div className="font-heading font-bold text-lg text-gray-600 w-6">{idx + 1}</div>
-                        <div>
-                          <p className="font-mono text-sm text-gray-900">{player.address}</p>
-                          {player.address === walletAddress && (
-                            <span className="text-xs text-[#836EF9] font-medium">You</span>
-                          )}
-                        </div>
-                      </div>
-                      <span className="font-heading font-bold text-gray-900">{player.score}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Game Finished Display */}
-        {arena?.game_status === 'finished' && (
-          <div className="mb-8 bg-white rounded-2xl border-2 border-blue-400 shadow-lg overflow-hidden">
-            <div className="p-6 bg-gradient-to-r from-blue-50 to-cyan-50 border-b border-blue-200">
-              <h3 className="font-heading text-2xl font-bold text-gray-900 flex items-center gap-2">
-                <CheckCircle className="w-6 h-6 text-blue-600" />
-                Game Complete
-              </h3>
-              <p className="text-gray-600 mt-1">Waiting for winner processing...</p>
-            </div>
+        {/* Interactive Game UI */}
+        {hasJoined && ['learning', 'active', 'finished'].includes(arena?.game_status) && (
+          <div className="mb-8">
+            <GameContainer
+              arenaAddress={address}
+              playerAddress={walletAddress}
+              onGameEnd={() => {}}
+            />
           </div>
         )}
 
@@ -568,7 +546,7 @@ useEffect(() => {
   <div className="mb-4 p-4 rounded-xl border border-orange-200 bg-orange-50 flex items-center gap-3">
     <Timer className="w-5 h-5 text-orange-500" />
     <div className="text-sm text-orange-900">
-      Waiting for more players… <span className="font-semibold">{idleCountdown}s</span> left before this arena is cancelled and refunded.
+      Registration closes in <span className="font-semibold">{idleCountdown}s</span>. If only one player remains, that player is refunded.
     </div>
   </div>
 )}
@@ -587,7 +565,7 @@ useEffect(() => {
           {" "}
           <a
             className="underline"
-            href={getExplorerUrl(arena.network, arena.refund_tx_hash)}
+            href={getExplorerUrl('tx', arena.refund_tx_hash)}
             target="_blank"
             rel="noreferrer"
           >

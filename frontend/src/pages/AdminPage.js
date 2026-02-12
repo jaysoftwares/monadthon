@@ -59,11 +59,17 @@ const AdminPage = () => {
     setCreating(true);
     
     try {
+      // Backend requires a contract_address; for local/mock admin flow we generate
+      // a deterministic placeholder address.
+      const seed = `${Date.now()}${Math.random().toString(16).slice(2)}`.padEnd(40, '0');
+      const contractAddress = `0x${seed.slice(0, 40)}`;
+
       const arenaData = {
         name: createForm.name,
         entry_fee: parseMON(createForm.entry_fee),
         max_players: parseInt(createForm.max_players),
         protocol_fee_bps: parseInt(createForm.protocol_fee_bps),
+        contract_address: contractAddress,
         treasury: address || '0x0000000000000000000000000000000000000000',
       };
       

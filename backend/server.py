@@ -119,6 +119,42 @@ async def _delete_arena_after_delay(arena_address: str, delay_seconds: int = 8):
     except Exception as e:
         logger.error(f"Failed to delete arena {arena_address} after delay: {e}")
 
+
+def _normalize_max_players(value: Any, default: int = 8) -> int:
+    """
+    Normalize max_players from DB/indexer payloads.
+    Guarantees at least 2 so first join does not auto-close malformed arenas.
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(2, parsed)
+
+
+def _normalize_arena_doc(arena: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize arena docs loaded from DB/indexer so response_model validation remains stable.
+    """
+    normalized = dict(arena)
+    address = normalized.get("address", "")
+
+    normalized["address"] = address
+    normalized["name"] = normalized.get("name") or f"Arena {address[:8]}"
+    normalized["entry_fee"] = str(normalized.get("entry_fee", "0"))
+    normalized["max_players"] = _normalize_max_players(normalized.get("max_players", 8))
+    normalized["protocol_fee_bps"] = int(normalized.get("protocol_fee_bps", 250))
+    normalized["treasury"] = normalized.get("treasury") or "0x0000000000000000000000000000000000000000"
+    normalized["is_closed"] = bool(normalized.get("is_closed", False))
+    normalized["is_finalized"] = bool(normalized.get("is_finalized", False))
+    normalized["players"] = normalized.get("players", []) or []
+    normalized["created_at"] = normalized.get("created_at") or datetime.now(timezone.utc).isoformat()
+    normalized["network"] = normalized.get("network") or DEFAULT_NETWORK
+    normalized["created_by"] = normalized.get("created_by") or "indexer"
+    normalized["game_status"] = normalized.get("game_status") or "waiting"
+
+    return normalized
+
 # ===========================================
 # ARENA TIMER MANAGEMENT
 # ===========================================
@@ -126,38 +162,173 @@ async def _delete_arena_after_delay(arena_address: str, delay_seconds: int = 8):
 
 class ArenaTimerManager:
     def __init__(self):
-        self.arena_timers = {}  # arena_address -> timer_data
+        self.timers = {}  # timer_key -> timer_data
         self.background_task = None
 
-    async def start_idle_timer(self, arena_address: str, idle_seconds: int = 60):
-        """Start an idle timer for 1 minute"""
-        idle_starts = datetime.now(timezone.utc).isoformat()
-        idle_ends_at = (datetime.now(timezone.utc) + timedelta(seconds=idle_seconds)).isoformat()
+    @staticmethod
+    def _timer_key(arena_address: str, timer_type: str) -> str:
+        return f"{arena_address}:{timer_type}"
 
-        self.arena_timers[arena_address] = {
+    @staticmethod
+    def _parse_iso(ts: str) -> datetime:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+    async def cancel_timer(self, arena_address: str, timer_type: Optional[str] = None):
+        """Cancel one timer type for an arena, or all timers if timer_type is None."""
+        if timer_type:
+            self.timers.pop(self._timer_key(arena_address, timer_type), None)
+        else:
+            keys = [k for k in self.timers.keys() if k.startswith(f"{arena_address}:")]
+            for key in keys:
+                self.timers.pop(key, None)
+
+    async def _set_registration_fields(self, arena_address: str, ends_at: str):
+        await db.arenas.update_one(
+            {"address": arena_address},
+            {"$set": {"registration_deadline": ends_at, "idle_starts_at": datetime.now(timezone.utc).isoformat(), "idle_ends_at": ends_at}},
+        )
+
+    async def _clear_registration_fields(self, arena_address: str):
+        await db.arenas.update_one(
+            {"address": arena_address},
+            {"$unset": {"idle_starts_at": "", "idle_ends_at": "", "registration_deadline": ""}},
+        )
+
+    async def start_registration_timer(self, arena_address: str, countdown_seconds: int = 60):
+        """
+        Start (or reset) the registration countdown.
+        If countdown expires with <2 players, refund; with >=2 players, game starts.
+        """
+        ends_at = (datetime.now(timezone.utc) + timedelta(seconds=countdown_seconds)).isoformat()
+        key = self._timer_key(arena_address, "registration_countdown")
+        self.timers[key] = {
+            "arena_address": arena_address,
+            "type": "registration_countdown",
+            "ends_at": ends_at,
+            "countdown_seconds": countdown_seconds,
+        }
+        await self._set_registration_fields(arena_address, ends_at)
+        logger.info(f"Started registration countdown for {arena_address}: {countdown_seconds}s")
+
+    async def start_idle_timer(self, arena_address: str, idle_seconds: int = 60):
+        """
+        Backward-compatible wrapper.
+        Existing admin endpoint still calls this, so keep behavior aligned.
+        """
+        ends_at = (datetime.now(timezone.utc) + timedelta(seconds=idle_seconds)).isoformat()
+        key = self._timer_key(arena_address, "idle_timer")
+        self.timers[key] = {
+            "arena_address": arena_address,
             "type": "idle_timer",
-            "idle_starts": idle_starts,
-            "idle_ends_at": idle_ends_at,
+            "ends_at": ends_at,
+            "idle_ends_at": ends_at,
             "idle_seconds": idle_seconds,
         }
+        await db.arenas.update_one(
+            {"address": arena_address},
+            {"$set": {"idle_starts_at": datetime.now(timezone.utc).isoformat(), "idle_ends_at": ends_at}},
+        )
+        logger.info(f"Started idle timer for {arena_address}: {idle_seconds}s")
 
-        try:
-            await db.arenas.update_one(
-                {"address": arena_address},
-                {
-                    "$set": {
-                        "idle_starts_at": idle_starts,
-                        "idle_ends_at": idle_ends_at,
+    async def start_game_countdown(self, arena_address: str, countdown_seconds: int = 10):
+        """Start short countdown after registration closes before learning phase begins."""
+        ends_at = (datetime.now(timezone.utc) + timedelta(seconds=countdown_seconds)).isoformat()
+        key = self._timer_key(arena_address, "game_start_countdown")
+        self.timers[key] = {
+            "arena_address": arena_address,
+            "type": "game_start_countdown",
+            "ends_at": ends_at,
+            "countdown_ends_at": ends_at,
+            "countdown_seconds": countdown_seconds,
+        }
+        await db.arenas.update_one(
+            {"address": arena_address},
+            {"$set": {"countdown_ends_at": ends_at}},
+        )
+        logger.info(f"Started game countdown for {arena_address}: {countdown_seconds}s")
+
+    async def start_round_timer(self, arena_address: str, game_id: str, round_number: int, seconds: int):
+        """Advance to next round automatically when round timer expires."""
+        ends_at = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+        key = self._timer_key(arena_address, "round_timer")
+        self.timers[key] = {
+            "arena_address": arena_address,
+            "type": "round_timer",
+            "game_id": game_id,
+            "round_number": round_number,
+            "ends_at": ends_at,
+            "round_seconds": seconds,
+        }
+        await db.arenas.update_one({"address": arena_address}, {"$set": {"round_ends_at": ends_at}})
+
+    async def start_learning_phase_timer(self, arena_address: str, learning_seconds: int):
+        ends_at = (datetime.now(timezone.utc) + timedelta(seconds=learning_seconds)).isoformat()
+        key = self._timer_key(arena_address, "learning_phase")
+        self.timers[key] = {
+            "arena_address": arena_address,
+            "type": "learning_phase",
+            "ends_at": ends_at,
+            "learning_seconds": learning_seconds,
+        }
+        await db.arenas.update_one(
+            {"address": arena_address},
+            {"$set": {"learning_phase_end": ends_at}},
+        )
+        logger.info(f"Started learning phase for {arena_address}: {learning_seconds}s")
+
+    async def start_game_end_timer(self, arena_address: str, ends_at: str):
+        key = self._timer_key(arena_address, "game_end")
+        self.timers[key] = {
+            "arena_address": arena_address,
+            "type": "game_end",
+            "ends_at": ends_at,
+        }
+        await db.arenas.update_one({"address": arena_address}, {"$set": {"tournament_end_estimate": ends_at}})
+
+    async def get_timer_status(self, arena_address: str):
+        """
+        Return a single most-relevant timer for compatibility with existing admin API.
+        Priority: game_start_countdown > registration_countdown > idle_timer > learning_phase > round_timer > game_end
+        """
+        priority = [
+            "game_start_countdown",
+            "registration_countdown",
+            "idle_timer",
+            "learning_phase",
+            "round_timer",
+            "game_end",
+        ]
+        for timer_type in priority:
+            timer = self.timers.get(self._timer_key(arena_address, timer_type))
+            if timer:
+                if timer_type == "registration_countdown":
+                    return {
+                        "type": timer_type,
+                        "registration_ends_at": timer["ends_at"],
+                        "countdown_seconds": timer["countdown_seconds"],
                     }
-                },
-            )
-        except Exception as e:
-            logger.error(f"Failed to persist idle timer for {arena_address}: {e}")
+                if timer_type == "game_start_countdown":
+                    return {
+                        "type": timer_type,
+                        "countdown_ends_at": timer["countdown_ends_at"],
+                        "countdown_seconds": timer["countdown_seconds"],
+                    }
+                if timer_type == "idle_timer":
+                    return {
+                        "type": timer_type,
+                        "idle_ends_at": timer["idle_ends_at"],
+                        "idle_seconds": timer["idle_seconds"],
+                    }
+                return {"type": timer_type, "ends_at": timer["ends_at"]}
+        return None
 
-        logger.info(f"Started idle timer for arena {arena_address}, expires in {idle_seconds}s")
-
-    async def _handle_idle_expiration(self, arena_address: str):
-        """Handle 1-minute timeout: Refund and reset, but DO NOT delete."""
+    async def _handle_registration_expiration(self, arena_address: str):
+        """
+        At registration expiry:
+        - 0 players: clear timer and keep arena open.
+        - 1 player: cancel/refund and mark arena cancelled/finalized.
+        - 2+ players: close registration and start game countdown.
+        """
         try:
             arena = await db.arenas.find_one({"address": arena_address})
             if not arena:
@@ -165,67 +336,101 @@ class ArenaTimerManager:
 
             players = arena.get("players", [])
             player_count = len(players)
+            await self._clear_registration_fields(arena_address)
 
-            # Case: 0 players
             if player_count == 0:
-                await db.arenas.update_one(
-                    {"address": arena_address},
-                    {"$unset": {"idle_starts_at": "", "idle_ends_at": ""}}
-                )
+                logger.info(f"Registration expired for {arena_address} with 0 players; arena left open")
                 return
 
-            # Case: 1 player (Trigger Refund)
             if player_count == 1:
                 try:
-                    network = arena.get("network", "monad_testnet")
+                    network = arena.get("network", DEFAULT_NETWORK)
                     refund_tx = await _cancel_and_refund_onchain(arena_address, network)
-
+                    player = players[0]
+                    refund_amount = arena.get("entry_fee", "0")
+                    await db.refunds.insert_one(
+                        {
+                            "arena_address": arena_address,
+                            "player_address": player,
+                            "amount": refund_amount,
+                            "tx_hash": refund_tx,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
                     await db.arenas.update_one(
                         {"address": arena_address},
                         {
                             "$set": {
-                                "players": [],
-                                "is_closed": False,
-                                "is_finalized": False,
-                                "status": "active",
-                                "last_refund_tx": refund_tx
+                                "is_closed": True,
+                                "is_finalized": True,
+                                "is_cancelled": True,
+                                "cancelled_at": datetime.now(timezone.utc).isoformat(),
+                                "refund_tx_hash": refund_tx,
+                                "closed_at": datetime.now(timezone.utc).isoformat(),
+                                "game_status": "cancelled",
                             },
-                            "$unset": {"idle_starts_at": "", "idle_ends_at": ""}
+                            "$unset": {"countdown_ends_at": "", "round_ends_at": ""},
                         },
                     )
-                    logger.info(f"Refunded {arena_address}. Tx: {refund_tx}")
+                    logger.info(f"Registration expired with 1 player. Refunded arena {arena_address}. Tx: {refund_tx}")
                 except Exception as e:
-                    logger.error(f"Refund failed: {e}")
+                    logger.error(f"Refund failed for {arena_address}: {e}")
                 return
 
-            # Case: 2+ players (Start Game)
+            # 2+ players: close registration and start game flow
             await db.arenas.update_one(
                 {"address": arena_address},
-                {"$set": {"is_closed": True}},
+                {"$set": {"is_closed": True, "closed_at": datetime.now(timezone.utc).isoformat()}},
             )
-            network = arena.get("network", "monad_testnet")
-            await _close_registration_onchain(arena_address, network)
+            network = arena.get("network", DEFAULT_NETWORK)
+            try:
+                close_tx = await _close_registration_onchain(arena_address, network)
+                await db.arenas.update_one({"address": arena_address}, {"$set": {"close_tx_hash": close_tx}})
+            except Exception as e:
+                logger.error(f"Failed to close registration on-chain for {arena_address}: {e}")
+
+            await self.start_game_countdown(arena_address, countdown_seconds=10)
 
         except Exception as e:
-            logger.error(f"Error in idle expiration: {e}")
+            logger.error(f"Error handling registration expiration for {arena_address}: {e}")
+
+    async def _handle_idle_expiration(self, arena_address: str):
+        """Backward-compatible idle timer expiration (same behavior as registration)."""
+        await self._handle_registration_expiration(arena_address)
 
     async def process_timers(self):
-        """Background loop to check for expired timers"""
+        """Background loop to check for expired timers."""
         while True:
             try:
                 now = datetime.now(timezone.utc)
-                expired = [addr for addr, t in self.arena_timers.items() 
-                           if now >= datetime.fromisoformat(t["idle_ends_at"])]
+                expired_keys = [k for k, t in self.timers.items() if now >= self._parse_iso(t["ends_at"])]
 
-                for addr in expired:
-                    self.arena_timers.pop(addr)
-                    await self._handle_idle_expiration(addr)
+                for key in expired_keys:
+                    timer = self.timers.pop(key, None)
+                    if not timer:
+                        continue
+
+                    arena_address = timer["arena_address"]
+                    timer_type = timer["type"]
+
+                    if timer_type == "registration_countdown":
+                        await self._handle_registration_expiration(arena_address)
+                    elif timer_type == "idle_timer":
+                        await self._handle_idle_expiration(arena_address)
+                    elif timer_type == "game_start_countdown":
+                        await self._trigger_game_start(arena_address)
+                    elif timer_type == "learning_phase":
+                        await self._activate_game_after_learning(arena_address)
+                    elif timer_type == "round_timer":
+                        await self._advance_round_on_timer(arena_address, timer)
+                    elif timer_type == "game_end":
+                        await self._finish_game_on_timer(arena_address)
             except Exception as e:
                 logger.error(f"Timer loop error: {e}")
             await asyncio.sleep(1)
 
     async def _trigger_game_start(self, arena_address: str):
-        """Trigger game start after countdown expires and automatically play through all rounds"""
+        """Create game and enter learning phase after the short post-registration countdown."""
         try:
             arena = await db.arenas.find_one({"address": arena_address})
             if not arena:
@@ -243,137 +448,119 @@ class ArenaTimerManager:
             except ValueError:
                 game_type = GameType.PREDICTION
 
-            # Create and start game
+            # Create game in learning phase first
             game = game_engine.create_game(arena_address=arena_address, game_type=game_type, players=players)
             game_id = game.game_id
+            learning_seconds = int(arena.get("learning_phase_seconds", 60))
+            learning_start = datetime.now(timezone.utc).isoformat()
+            learning_end = (datetime.now(timezone.utc) + timedelta(seconds=learning_seconds)).isoformat()
 
-            # Start the game (moves from learning to active)
-            game_engine.start_game(game_id)
-
-            # Update arena with game_id and active status
             await db.arenas.update_one(
                 {"address": arena_address},
                 {
                     "$set": {
                         "game_id": game_id,
-                        "game_status": "active",
-                        "game_start": datetime.now(timezone.utc).isoformat(),
+                        "game_status": "learning",
+                        "learning_phase_start": learning_start,
+                        "learning_phase_end": learning_end,
                     }
                 },
             )
 
-            logger.info(f"Game started for arena {arena_address}, game_id: {game_id}")
-
-            # Automatically play through all game rounds
-            await self._play_game_to_completion(arena_address, game_id)
+            await self.start_learning_phase_timer(arena_address, learning_seconds=learning_seconds)
+            logger.info(f"Game created for arena {arena_address}, game_id: {game_id}, learning={learning_seconds}s")
 
         except Exception as e:
             logger.error(f"Error triggering game start for arena {arena_address}: {e}")
 
-    async def _play_game_to_completion(self, arena_address: str, game_id: str):
-        """
-        Automatically play through all game rounds and determine winners.
-        This runs the game to completion, then processes winners and payouts.
-        """
+    async def _activate_game_after_learning(self, arena_address: str):
+        """Move game from learning -> active, then schedule round/game timers."""
         try:
-            if game_id not in game_engine.active_games:
-                logger.error(f"Game {game_id} not found in active games")
+            arena = await db.arenas.find_one({"address": arena_address})
+            if not arena:
+                return
+
+            game_id = arena.get("game_id")
+            if not game_id or game_id not in game_engine.active_games:
+                logger.error(f"Cannot activate game for {arena_address}; missing game_id")
                 return
 
             game = game_engine.active_games[game_id]
+            if game.status != "active":
+                game_engine.start_game(game_id)
 
-            # Determine max rounds based on game type
-            max_rounds = {
-                GameType.CLAW: 1,
-                GameType.PREDICTION: 3,
-                GameType.SPEED: 10,
-                GameType.BLACKJACK: 5,
-            }
+            await db.arenas.update_one(
+                {"address": arena_address},
+                {
+                    "$set": {
+                        "game_status": "active",
+                        "game_start": datetime.now(timezone.utc).isoformat(),
+                        "tournament_end_estimate": game.ends_at,
+                    },
+                    "$unset": {"countdown_ends_at": ""},
+                },
+            )
 
-            max_round = max_rounds.get(game.game_type, 3)
+            round_seconds = int(game.current_challenge.get("time_limit", 20)) if game.current_challenge else 20
+            await self.start_round_timer(arena_address, game_id, game.round_number, round_seconds)
+            if game.ends_at:
+                await self.start_game_end_timer(arena_address, game.ends_at)
 
-            logger.info(f"Starting automatic game play for {game_id}, max rounds: {max_round}")
-
-            while game.round_number <= max_round and game.status == "active":
-                logger.info(f"Game {game_id} - Round {game.round_number}/{max_round}")
-
-                # Generate moves for each player
-                for addr in game.players.keys():
-                    if game.players[addr].is_eliminated:
-                        continue
-
-                    auto_move = self._generate_auto_move(game, addr)
-                    if auto_move:
-                        success, msg, result = game_engine.submit_move(
-                            game_id=game_id, player_address=addr, move=auto_move
-                        )
-                        logger.debug(f"Player {addr} move: {msg}")
-
-                # Advance to next round (or finish if at max)
-                if game.round_number >= max_round:
-                    game_engine.finish_game(game_id)
-                    logger.info(f"Game {game_id} finished after round {game.round_number}")
-                    break
-                else:
-                    game_engine.advance_round(game_id)
-                    logger.info(f"Game {game_id} advanced to round {game.round_number}")
-
-                await asyncio.sleep(0.1)
-
-            await self._process_game_winners(arena_address, game_id)
-
+            logger.info(f"Game activated for arena {arena_address}, game_id: {game_id}")
         except Exception as e:
-            logger.error(f"Error playing game to completion for {game_id}: {e}")
+            logger.error(f"Error activating game for {arena_address}: {e}")
 
-    def _generate_auto_move(self, game: GameState, player_address: str) -> Optional[Dict]:
-        """Generate an automatic move for a player based on game type"""
+    async def _advance_round_on_timer(self, arena_address: str, timer: Dict[str, Any]):
+        """Advance game round when round timer expires."""
         try:
-            if game.game_type == GameType.CLAW:
-                prizes = game.current_challenge.get("prizes", [])
-                available = [p for p in prizes if not p.get("grabbed")]
-                if available:
-                    prize = random.choice(available)
-                    return {
-                        "prize_id": prize["id"],
-                        "x": prize["x"] + random.randint(-5, 5),
-                        "y": prize["y"] + random.randint(-5, 5),
-                    }
+            game_id = timer.get("game_id")
+            expected_round = timer.get("round_number")
+            if not game_id or game_id not in game_engine.active_games:
+                return
 
-            elif game.game_type == GameType.PREDICTION:
-                challenge = game.current_challenge
-                min_val = challenge.get("min", 0)
-                max_val = challenge.get("max", 100)
-                prediction = random.randint(min_val, max_val)
-                return {"prediction": prediction}
+            game = game_engine.active_games[game_id]
+            if game.status != "active":
+                return
 
-            elif game.game_type == GameType.SPEED:
-                challenge = game.current_challenge
-                if challenge["type"] == "math":
-                    if random.random() < 0.6:
-                        return {"answer": challenge["answer"], "response_time_ms": random.randint(100, 5000)}
-                    return {"answer": challenge["answer"] + random.randint(1, 10), "response_time_ms": random.randint(100, 5000)}
+            # Ignore stale timer from a previous round
+            if expected_round is not None and int(expected_round) != int(game.round_number):
+                return
 
-                if challenge["type"] == "pattern":
-                    if random.random() < 0.6:
-                        return {"answer": challenge["answer"], "response_time_ms": random.randint(100, 5000)}
-                    return {"answer": challenge["answer"] + random.randint(1, 5), "response_time_ms": random.randint(100, 5000)}
+            next_state = game_engine.advance_round(game_id)
+            if not next_state:
+                return
 
-                if challenge["type"] == "reaction":
-                    return {"answer": None, "response_time_ms": random.randint(200, 800)}
+            if next_state.status == "finished":
+                await db.arenas.update_one({"address": arena_address}, {"$set": {"game_status": "finished"}})
+                await self.cancel_timer(arena_address, "game_end")
+                await self._process_game_winners(arena_address, game_id)
+                return
 
-            elif game.game_type == GameType.BLACKJACK:
-                challenge = game.current_challenge
-                hand = challenge.get("player_hands", {}).get(player_address)
-                if hand and hand.get("status") == "playing":
-                    total = game_engine._calculate_blackjack_hand(hand["cards"])
-                    if total < 17:
-                        return {"action": "hit"}
-                    return {"action": "stand"}
-
+            round_seconds = int(next_state.current_challenge.get("time_limit", 20)) if next_state.current_challenge else 20
+            await self.start_round_timer(arena_address, game_id, next_state.round_number, round_seconds)
         except Exception as e:
-            logger.debug(f"Error generating auto move for {player_address}: {e}")
+            logger.error(f"Error advancing round for {arena_address}: {e}")
 
-        return None
+    async def _finish_game_on_timer(self, arena_address: str):
+        """Finish game when its absolute end timestamp is reached."""
+        try:
+            arena = await db.arenas.find_one({"address": arena_address})
+            if not arena:
+                return
+
+            game_id = arena.get("game_id")
+            if not game_id or game_id not in game_engine.active_games:
+                return
+
+            game = game_engine.active_games[game_id]
+            if game.status != "finished":
+                game_engine.finish_game(game_id)
+                await db.arenas.update_one({"address": arena_address}, {"$set": {"game_status": "finished"}})
+
+            await self.cancel_timer(arena_address, "round_timer")
+            await self._process_game_winners(arena_address, game_id)
+        except Exception as e:
+            logger.error(f"Error finishing game on timer for {arena_address}: {e}")
 
     async def _process_game_winners(self, arena_address: str, game_id: str):
         """
@@ -464,6 +651,7 @@ class ArenaTimerManager:
                         "$set": {
                             "is_finalized": True,
                             "finalize_tx_hash": finalize_tx,
+                            "tx_hash": finalize_tx,
                             "finalized_at": datetime.now(timezone.utc).isoformat(),
                         }
                     },
@@ -530,11 +718,12 @@ async def _cancel_and_refund_onchain(arena_address: str, network: str) -> str:
     config = get_network_config(network)
     if not config.rpc_url:
         raise Exception("RPC URL not configured")
-    if not OPERATOR_PRIVATE_KEY:
+    operator_private_key = os.environ.get("OPERATOR_PRIVATE_KEY", "")
+    if not operator_private_key:
         raise Exception("OPERATOR_PRIVATE_KEY not configured")
 
     w3 = Web3(Web3.HTTPProvider(config.rpc_url))
-    acct = Account.from_key(OPERATOR_PRIVATE_KEY)
+    acct = Account.from_key(operator_private_key)
     contract = w3.eth.contract(address=Web3.to_checksum_address(arena_address), abi=ARENA_ESCROW_ABI)
 
     nonce = w3.eth.get_transaction_count(acct.address)
@@ -573,7 +762,7 @@ async def _finalize_onchain(arena_address: str, winners: list, amounts: list, ne
     }
 
     async with httpx.AsyncClient(timeout=20) as http_client:
-        r = await http_client.post(f"{signer_url}/sign/finalize", json=payload)
+        r = await http_client.post(f"{signer_url}/sign", json=payload)
         r.raise_for_status()
         sig = r.json().get("signature")
         if not sig:
@@ -679,6 +868,12 @@ class LeaderboardEntry(BaseModel):
 
 class FinalizeRequest(BaseModel):
     arena_address: str
+    winners: List[str]
+    amounts: List[str]
+
+
+class FinalizeRecordRequest(BaseModel):
+    tx_hash: str
     winners: List[str]
     amounts: List[str]
 
@@ -860,7 +1055,7 @@ async def get_arenas(network: str = Query(default=None)):
     if network:
         query["network"] = network
     arenas = await db.arenas.find(query, {"_id": 0}).to_list(100)
-    return arenas
+    return [_normalize_arena_doc(a) for a in arenas]
 
 
 @api_router.get("/arenas/{address}", response_model=Arena)
@@ -868,7 +1063,7 @@ async def get_arena(address: str):
     arena = await db.arenas.find_one({"address": address}, {"_id": 0})
     if not arena:
         raise HTTPException(status_code=404, detail="Arena not found")
-    return arena
+    return _normalize_arena_doc(arena)
 
 
 @api_router.get("/leaderboard", response_model=List[LeaderboardEntry])
@@ -1051,7 +1246,11 @@ async def join_arena(join_data: JoinArena):
     if arena.get("is_finalized"):
         raise HTTPException(status_code=400, detail="Arena is already finalized")
 
-    if len(arena.get("players", [])) >= arena.get("max_players", 8):
+    max_players_initial = _normalize_max_players(arena.get("max_players", 8))
+    if arena.get("max_players") != max_players_initial:
+        await db.arenas.update_one({"address": join_data.arena_address}, {"$set": {"max_players": max_players_initial}})
+
+    if len(arena.get("players", [])) >= max_players_initial:
         raise HTTPException(status_code=400, detail="Arena is full")
 
     if join_data.player_address in arena.get("players", []):
@@ -1072,11 +1271,16 @@ async def join_arena(join_data: JoinArena):
 
     updated_arena = await db.arenas.find_one({"address": join_data.arena_address})
     players = updated_arena.get("players", [])
-    max_players = updated_arena.get("max_players", 8)
+    max_players = _normalize_max_players(updated_arena.get("max_players", 8))
+    if updated_arena.get("max_players") != max_players:
+        await db.arenas.update_one({"address": join_data.arena_address}, {"$set": {"max_players": max_players}})
 
     response = {"success": True, "message": "Player joined arena", "tx_hash": join_data.tx_hash}
 
     if len(players) >= max_players and not updated_arena.get("is_closed"):
+        await timer_manager.cancel_timer(join_data.arena_address, "registration_countdown")
+        await timer_manager.cancel_timer(join_data.arena_address, "idle_timer")
+
         await db.arenas.update_one(
             {"address": join_data.arena_address},
             {"$set": {"is_closed": True, "closed_at": datetime.now(timezone.utc).isoformat()}},
@@ -1096,18 +1300,20 @@ async def join_arena(join_data: JoinArena):
         response["countdown_seconds"] = 10
         logger.info(f"Arena {join_data.arena_address} is now full, starting game countdown")
 
-    elif len(players) >= 2 and not updated_arena.get("is_closed"):
-        # 2+ players but not full – reset idle timer to give time for more players
-        await timer_manager.start_idle_timer(join_data.arena_address, idle_seconds=20)
-        response["idle_timer_reset"] = True
-        response["idle_seconds"] = 20
-        logger.info(f"Arena {join_data.arena_address} has {len(players)} player(s), idle timer reset")
+    elif len(players) == 1 and not updated_arena.get("is_closed"):
+        # Core flow: once first player joins, start 60s registration countdown.
+        await timer_manager.start_registration_timer(join_data.arena_address, countdown_seconds=60)
+        response["registration_timer_started"] = True
+        response["registration_seconds"] = 60
+        logger.info(f"Arena {join_data.arena_address} first join -> registration countdown started (60s)")
 
-    elif len(players) <= 1 and not updated_arena.get("is_closed"):
-        await timer_manager.start_idle_timer(join_data.arena_address, idle_seconds=20)
-        response["idle_timer_started"] = True
-        response["idle_seconds"] = 20
-        logger.info(f"Arena {join_data.arena_address} has {len(players)} player(s), idle timer started")
+    elif len(players) >= 2 and not updated_arena.get("is_closed"):
+        # Keep registration window open for countdown duration.
+        if not updated_arena.get("registration_deadline"):
+            await timer_manager.start_registration_timer(join_data.arena_address, countdown_seconds=60)
+        response["registration_open"] = True
+        response["player_count"] = len(players)
+        logger.info(f"Arena {join_data.arena_address} has {len(players)} players; waiting for registration countdown")
 
     return response
 
@@ -1122,6 +1328,9 @@ async def create_arena(
     arena_data: ArenaCreate, network: str = Query(default=DEFAULT_NETWORK), _: bool = Depends(verify_admin_key)
 ):
     config = get_network_config(network)
+
+    if arena_data.max_players < 2:
+        raise HTTPException(status_code=400, detail="max_players must be at least 2")
 
     if not arena_data.contract_address.startswith("0x") or len(arena_data.contract_address) != 42:
         raise HTTPException(status_code=400, detail="Invalid contract address format")
@@ -1223,7 +1432,7 @@ async def request_finalize_signature(request: FinalizeRequest, _: bool = Depends
 
 
 @api_router.post("/admin/arena/{address}/finalize")
-async def record_finalize(address: str, tx_hash: str, winners: List[str], amounts: List[str], _: bool = Depends(verify_admin_key)):
+async def record_finalize(address: str, payload: FinalizeRecordRequest, _: bool = Depends(verify_admin_key)):
     arena = await db.arenas.find_one({"address": address})
     if not arena:
         raise HTTPException(status_code=404, detail="Arena not found")
@@ -1233,11 +1442,19 @@ async def record_finalize(address: str, tx_hash: str, winners: List[str], amount
 
     await db.arenas.update_one(
         {"address": address},
-        {"$set": {"is_finalized": True, "finalized_at": datetime.now(timezone.utc).isoformat(), "winners": winners, "payouts": amounts, "tx_hash": tx_hash}},
+        {
+            "$set": {
+                "is_finalized": True,
+                "finalized_at": datetime.now(timezone.utc).isoformat(),
+                "winners": payload.winners,
+                "payouts": payload.amounts,
+                "tx_hash": payload.tx_hash,
+            }
+        },
     )
 
-    for winner, amount in zip(winners, amounts):
-        payout = PayoutRecord(arena_address=address, winner_address=winner, amount=amount, tx_hash=tx_hash)
+    for winner, amount in zip(payload.winners, payload.amounts):
+        payout = PayoutRecord(arena_address=address, winner_address=winner, amount=amount, tx_hash=payload.tx_hash)
         await db.payouts.insert_one(payout.model_dump())
 
         current = await db.leaderboard.find_one({"address": winner})
@@ -1250,8 +1467,8 @@ async def record_finalize(address: str, tx_hash: str, winners: List[str], amount
             upsert=True,
         )
 
-    logger.info(f"Finalized arena {address} with tx {tx_hash}")
-    return {"success": True, "message": "Arena finalized", "tx_hash": tx_hash}
+    logger.info(f"Finalized arena {address} with tx {payload.tx_hash}")
+    return {"success": True, "message": "Arena finalized", "tx_hash": payload.tx_hash}
 
 
 @api_router.get("/admin/arena/{address}/check-game-status")
@@ -1282,6 +1499,10 @@ async def check_game_status(address: str, _: bool = Depends(verify_admin_key)):
 
         if timer_status["type"] == "game_start_countdown":
             ends_at = datetime.fromisoformat(timer_status["countdown_ends_at"].replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            response["time_remaining_seconds"] = max(0, int((ends_at - now).total_seconds()))
+        elif timer_status["type"] == "registration_countdown":
+            ends_at = datetime.fromisoformat(timer_status["registration_ends_at"].replace("Z", "+00:00"))
             now = datetime.now(timezone.utc)
             response["time_remaining_seconds"] = max(0, int((ends_at - now).total_seconds()))
         elif timer_status["type"] == "idle_timer":
@@ -1388,7 +1609,9 @@ async def check_if_full(address: str, _: bool = Depends(verify_admin_key)):
         raise HTTPException(status_code=404, detail="Arena not found")
 
     players = arena.get("players", [])
-    max_players = arena.get("max_players", 8)
+    max_players = _normalize_max_players(arena.get("max_players", 8))
+    if arena.get("max_players") != max_players:
+        await db.arenas.update_one({"address": address}, {"$set": {"max_players": max_players}})
 
     is_full = len(players) >= max_players
 
@@ -1428,16 +1651,17 @@ async def start_idle_timer(address: str, _: bool = Depends(verify_admin_key)):
     players = arena.get("players", [])
 
     if len(players) > 1:
-        return {"success": False, "message": f"Arena has {len(players)} players, idle timer not needed"}
+        return {"success": False, "message": f"Arena has {len(players)} players, registration timer not needed"}
 
-    await timer_manager.start_idle_timer(address, idle_seconds=20)
+    # Backward-compatible endpoint for old clients.
+    await timer_manager.start_registration_timer(address, countdown_seconds=60)
 
     return {
         "success": True,
         "arena_address": address,
         "player_count": len(players),
-        "idle_seconds": 20,
-        "message": "Idle timer started, arena will be deleted if still empty/1-player after 20 seconds",
+        "registration_seconds": 60,
+        "message": "Registration countdown started (60s). If one player remains, that player is refunded.",
     }
 
 
@@ -1915,9 +2139,38 @@ async def join_arena_with_agent(address: str, agent_id: str = Query(...), owner_
 
 
 @api_router.post("/indexer/event/arena-created")
-async def index_arena_created(arena: Arena):
-    await db.arenas.update_one({"address": arena.address}, {"$set": arena.model_dump()}, upsert=True)
-    logger.info(f"Indexed arena created: {arena.address}")
+async def index_arena_created(payload: Dict[str, Any]):
+    address = payload.get("address")
+    if not address:
+        raise HTTPException(status_code=400, detail="address is required")
+
+    normalized_payload = dict(payload)
+    if "max_players" in normalized_payload:
+        normalized_payload["max_players"] = _normalize_max_players(normalized_payload.get("max_players"))
+
+    await db.arenas.update_one(
+        {"address": address},
+        {
+            "$set": normalized_payload,
+            "$setOnInsert": {
+                "address": address,
+                "name": normalized_payload.get("name", f"Arena {address[:8]}"),
+                "entry_fee": str(normalized_payload.get("entry_fee", "0")),
+                "max_players": _normalize_max_players(normalized_payload.get("max_players", 8)),
+                "protocol_fee_bps": int(normalized_payload.get("protocol_fee_bps", 250)),
+                "treasury": normalized_payload.get("treasury", "0x0000000000000000000000000000000000000000"),
+                "is_closed": bool(normalized_payload.get("is_closed", False)),
+                "is_finalized": bool(normalized_payload.get("is_finalized", False)),
+                "players": normalized_payload.get("players", []),
+                "created_at": normalized_payload.get("created_at", datetime.now(timezone.utc).isoformat()),
+                "network": normalized_payload.get("network", DEFAULT_NETWORK),
+                "created_by": normalized_payload.get("created_by", "indexer"),
+                "game_status": normalized_payload.get("game_status", "waiting"),
+            },
+        },
+        upsert=True,
+    )
+    logger.info(f"Indexed arena created: {address}")
     return {"success": True, "message": "Arena indexed"}
 
 

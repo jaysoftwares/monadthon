@@ -746,9 +746,21 @@ class AutonomousAgent:
         for arena in arenas:
             if arena.get('is_finalized') or not arena.get('is_closed'):
                 continue
+            if arena.get('is_cancelled'):
+                continue
 
             players = arena.get('players', [])
             if len(players) < 2:
+                continue
+
+            game_status = (arena.get('game_status') or '').lower()
+            game_results = arena.get('game_results', {}) or {}
+            has_winner_results = bool(game_results.get('winners'))
+            if game_status != 'finished' and not has_winner_results:
+                logger.debug(
+                    f"Skipping finalization for {arena.get('address', '')[:10]}... "
+                    f"(status={game_status or 'unknown'}, waiting for game completion)"
+                )
                 continue
 
             address = arena.get('address')
@@ -808,14 +820,14 @@ class AutonomousAgent:
     ):
         """Request the backend to finalize a tournament"""
         try:
+            mock_tx_hash = "0x" + hashlib.sha256(f"{arena_address}{time.time()}".encode()).hexdigest()
             response = await self.http_client.post(
-                f"{BACKEND_API_URL}/api/admin/arena/finalize",
+                f"{BACKEND_API_URL}/api/admin/arena/{arena_address}/finalize",
                 headers={"X-Admin-Key": ADMIN_API_KEY},
                 json={
-                    "arena_address": arena_address,
+                    "tx_hash": mock_tx_hash,
                     "winners": winners,
                     "amounts": amounts,
-                    "network": DEFAULT_NETWORK,
                 }
             )
             if response.status_code == 200:
