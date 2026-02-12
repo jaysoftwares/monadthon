@@ -89,10 +89,13 @@ const ArenaPage = () => {
   }, [arena]);
 
   useEffect(() => {
-    if (!arena?.is_finalized || !walletAddress) return;
-    if (!Array.isArray(arena.winners) || !arena.winners.includes(walletAddress)) return;
+    const winners = Array.isArray(arena?.winners) && arena.winners.length > 0
+      ? arena.winners
+      : (Array.isArray(arena?.game_results?.winners) ? arena.game_results.winners : []);
+    const ended = arena?.game_status === 'finished' || arena?.is_finalized;
+    if (!ended || winners.length === 0) return;
 
-    const celebrationKey = `${arena.address}:${arena.tx_hash || arena.finalized_at || ''}`;
+    const celebrationKey = `${arena.address}:${arena.tx_hash || arena.finalized_at || arena?.game_results?.finished_at || 'ended'}`;
     if (winnerCelebrationKeyRef.current === celebrationKey) return;
     winnerCelebrationKeyRef.current = celebrationKey;
 
@@ -115,7 +118,7 @@ const ArenaPage = () => {
       if (Date.now() < end) requestAnimationFrame(frame);
     };
     frame();
-  }, [arena?.is_finalized, arena?.address, arena?.tx_hash, arena?.finalized_at, arena?.winners, walletAddress]);
+  }, [arena?.game_status, arena?.is_finalized, arena?.address, arena?.tx_hash, arena?.finalized_at, arena?.winners, arena?.game_results?.winners, arena?.game_results?.finished_at]);
 
   // Fetch arena and game state
   useEffect(() => {
@@ -370,9 +373,16 @@ useEffect(() => {
   }
 
   const playerCount = arena.players?.length || 0;
-  const isWalletWinner = !!(arena?.is_finalized && walletAddress && arena?.winners?.includes(walletAddress));
-  const walletWinnerIndex = isWalletWinner ? arena.winners.indexOf(walletAddress) : -1;
-  const walletWinnerPayout = walletWinnerIndex >= 0 ? arena?.payouts?.[walletWinnerIndex] : null;
+  const resolvedWinners = Array.isArray(arena?.winners) && arena.winners.length > 0
+    ? arena.winners
+    : (Array.isArray(arena?.game_results?.winners) ? arena.game_results.winners : []);
+  const resolvedPayouts = Array.isArray(arena?.payouts) ? arena.payouts : [];
+  const resultsAvailable = resolvedWinners.length > 0 && (arena?.game_status === 'finished' || arena?.is_finalized);
+  const isWalletWinner = !!(walletAddress && resolvedWinners.includes(walletAddress));
+  const walletWinnerIndex = isWalletWinner ? resolvedWinners.indexOf(walletAddress) : -1;
+  const walletWinnerPayout = walletWinnerIndex >= 0 ? resolvedPayouts[walletWinnerIndex] : null;
+  const topWinner = resolvedWinners[0] || null;
+  const topWinnerPayout = resolvedPayouts[0] || null;
   const prizePool = BigInt(arena.entry_fee || '0') * BigInt(playerCount);
   const protocolFee = (prizePool * BigInt(arena.protocol_fee_bps || 250)) / BigInt(10000);
   const netPrizePool = prizePool - protocolFee;
@@ -504,15 +514,21 @@ useEffect(() => {
         )}
 
         {/* Winner Announcement (restored) */}
-        {isWalletWinner && (
+        {resultsAvailable && topWinner && (
           <div className="mb-8 bg-gradient-to-r from-yellow-50 to-orange-50 rounded-2xl p-6 border border-yellow-200">
             <div className="flex items-center gap-3 mb-2">
               <PartyPopper className="w-6 h-6 text-yellow-600" />
               <h3 className="font-heading text-2xl font-bold text-yellow-700">Winner!</h3>
             </div>
-            <p className="text-yellow-800 font-medium">
-              Congratulations, you won {walletWinnerPayout ? `${formatMON(walletWinnerPayout)} MON` : 'this tournament'}.
-            </p>
+            {isWalletWinner ? (
+              <p className="text-yellow-800 font-medium">
+                Congratulations, you won {walletWinnerPayout ? `${formatMON(walletWinnerPayout)} MON` : 'this tournament'}.
+              </p>
+            ) : (
+              <p className="text-yellow-800 font-medium">
+                {topWinner} won {topWinnerPayout ? `${formatMON(topWinnerPayout)} MON` : 'this tournament'}.
+              </p>
+            )}
           </div>
         )}
 
@@ -704,8 +720,8 @@ useEffect(() => {
           )}
         </div>
 
-        {/* Finalized Results */}
-        {arena.is_finalized && arena.winners?.length > 0 && (
+        {/* Results */}
+        {resultsAvailable && (
           <div className="bg-white rounded-2xl border border-gray-100 shadow-card overflow-hidden" data-testid="results-section">
             <div className="p-6 border-b border-gray-100 bg-gradient-to-r from-purple-50 to-white">
               <h3 className="font-heading text-xl font-semibold text-gray-900 flex items-center gap-2">
@@ -715,7 +731,7 @@ useEffect(() => {
             </div>
 
             <div className="divide-y divide-gray-50">
-              {arena.winners.map((winner, index) => (
+              {resolvedWinners.map((winner, index) => (
                 <div key={winner} className="px-6 py-4 flex items-center justify-between" data-testid={`winner-${index}`}>
                   <div className="flex items-center gap-4">
                     <div className={`leaderboard-rank ${index === 0 ? 'gold' : index === 1 ? 'silver' : index === 2 ? 'bronze' : 'default'}`}>
@@ -729,13 +745,13 @@ useEffect(() => {
                     </div>
                   </div>
                   <span className="font-heading font-bold text-[#836EF9]">
-                    {formatMON(arena.payouts[index])} MON
+                    {resolvedPayouts[index] ? `${formatMON(resolvedPayouts[index])} MON` : 'Pending'}
                   </span>
                 </div>
               ))}
             </div>
 
-            {arena.tx_hash && (
+            {arena.tx_hash ? (
               <div className="p-6 border-t border-gray-100 bg-gray-50">
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-500">Finalize Transaction</span>
@@ -750,6 +766,10 @@ useEffect(() => {
                     <ExternalLink className="w-3 h-3" />
                   </a>
                 </div>
+              </div>
+            ) : (
+              <div className="p-6 border-t border-gray-100 bg-gray-50">
+                <span className="text-sm text-gray-500">Payout transaction pending finalization...</span>
               </div>
             )}
           </div>
