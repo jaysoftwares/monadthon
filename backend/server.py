@@ -27,6 +27,7 @@ ARENA_ESCROW_ABI = [
         "type": "function",
     },
     {"inputs": [], "name": "closeRegistration", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+    {"inputs": [], "name": "cancelAndRefund", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
     {
         "inputs": [
             {"internalType": "address[]", "name": "winners", "type": "address[]"},
@@ -108,6 +109,16 @@ api_router = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+
+async def _delete_arena_after_delay(arena_address: str, delay_seconds: int = 8):
+    """Delete arena doc after a short delay (lets frontend show refund/cancel state)."""
+    try:
+        await asyncio.sleep(delay_seconds)
+        await db.arenas.delete_one({"address": arena_address})
+        logger.info(f"Deleted arena {arena_address} after delay {delay_seconds}s")
+    except Exception as e:
+        logger.error(f"Failed to delete arena {arena_address} after delay: {e}")
+
 # ===========================================
 # ARENA TIMER MANAGEMENT
 # ===========================================
@@ -145,11 +156,23 @@ class ArenaTimerManager:
             "idle_seconds": idle_seconds,
         }
 
+
+# Persist idle timer in DB so frontend can show an accurate countdown
+try:
+    await db.arenas.update_one(
+        {"address": arena_address},
+        {"$set": {"idle_starts_at": self.arena_timers[arena_address]["idle_starts"], "idle_ends_at": idle_ends_at}},
+    )
+except Exception as e:
+    logger.error(f"Failed to persist idle timer for {arena_address}: {e}")
+
         logger.info(f"Started idle timer for arena {arena_address}, expires in {idle_seconds}s")
 
     async def cancel_timer(self, arena_address: str):
         """Cancel any timer for an arena"""
         if arena_address in self.arena_timers:
+# Clear persisted timer fields
+await db.arenas.update_one({"address": arena_address}, {"$unset": {"idle_starts_at": "", "idle_ends_at": ""}})
             del self.arena_timers[arena_address]
             logger.info(f"Cancelled timer for arena {arena_address}")
 
@@ -486,22 +509,52 @@ class ArenaTimerManager:
                 logger.info(f"Deleted empty arena {arena_address}")
 
             elif player_count == 1:
-                player_address = players[0]
-                entry_fee = arena.get("entry_fee", "0")
 
-                refund_record = {
-                    "arena_address": arena_address,
-                    "player_address": player_address,
-                    "amount": entry_fee,
-                    "reason": "idle_timeout_single_player",
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-                await db.refunds.insert_one(refund_record)
+player_address = players[0]
+entry_fee = arena.get("entry_fee", "0")
 
-                await db.arenas.delete_one({"address": arena_address})
-                logger.info(f"Deleted arena {arena_address} with 1 player, refunded {player_address}")
+cancelled_at = datetime.now(timezone.utc).isoformat()
 
-            elif player_count >= 2:
+# Mark arena cancelled so frontend can show refund state before deletion
+await db.arenas.update_one(
+    {"address": arena_address},
+    {"$set": {"is_cancelled": True, "cancel_reason": "idle_timeout_single_player", "cancelled_at": cancelled_at}},
+)
+
+refund_record = {
+    "arena_address": arena_address,
+    "player_address": player_address,
+    "amount": entry_fee,
+    "reason": "idle_timeout_single_player",
+    "created_at": cancelled_at,
+    "status": "pending",
+    "refund_tx_hash": None,
+}
+
+try:
+    network = arena.get("network", DEFAULT_NETWORK)
+    refund_tx = await _cancel_and_refund_onchain(arena_address, network)
+    refund_record["status"] = "submitted"
+    refund_record["refund_tx_hash"] = refund_tx
+    await db.arenas.update_one(
+        {"address": arena_address},
+        {"$set": {"refund_tx_hash": refund_tx, "refund_status": "submitted"}},
+    )
+except Exception as e:
+    logger.error(f"Failed to cancel/refund on-chain for {arena_address}: {e}")
+    refund_record["status"] = "failed"
+    await db.arenas.update_one(
+        {"address": arena_address},
+        {"$set": {"refund_status": "failed", "refund_error": str(e)}},
+    )
+
+await db.refunds.insert_one(refund_record)
+
+# delete after short delay so UI can show the refund message first
+asyncio.create_task(_delete_arena_after_delay(arena_address, delay_seconds=8))
+logger.info(f"Cancelled arena {arena_address} with 1 player, refund status: {refund_record['status']}")
+
+elif player_count >= 2:
                 # Close registration first
                 await db.arenas.update_one(
                     {"address": arena_address},
@@ -579,6 +632,34 @@ async def _close_registration_onchain(arena_address: str, network: str) -> str:
     escrow = w3.eth.contract(address=Web3.to_checksum_address(arena_address), abi=ARENA_ESCROW_ABI)
     txh = _send_contract_tx(w3, escrow, escrow.functions.closeRegistration(), account)
     return txh
+
+
+async def _cancel_and_refund_onchain(arena_address: str, network: str) -> str:
+    """Call cancelAndRefund() on the ArenaEscrow contract to refund players if <2 joined."""
+    config = get_network_config(network)
+    if not config.rpc_url:
+        raise Exception("RPC URL not configured")
+    if not OPERATOR_PRIVATE_KEY:
+        raise Exception("OPERATOR_PRIVATE_KEY not configured")
+
+    w3 = Web3(Web3.HTTPProvider(config.rpc_url))
+    acct = Account.from_key(OPERATOR_PRIVATE_KEY)
+    contract = w3.eth.contract(address=Web3.to_checksum_address(arena_address), abi=ARENA_ESCROW_ABI)
+
+    nonce = w3.eth.get_transaction_count(acct.address)
+    tx = contract.functions.cancelAndRefund().build_transaction(
+        {
+            "from": acct.address,
+            "nonce": nonce,
+            "gas": 350000,
+            "maxFeePerGas": w3.to_wei("2", "gwei"),
+            "maxPriorityFeePerGas": w3.to_wei("1", "gwei"),
+            "chainId": config.chain_id,
+        }
+    )
+    signed = acct.sign_transaction(tx)
+    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    return tx_hash.hex()
 
 
 async def _finalize_onchain(arena_address: str, winners: list, amounts: list, network: str) -> str:
@@ -911,6 +992,12 @@ async def get_arena_players(address: str):
     return {"arena_address": address, "players": [j["player_address"] for j in joins]}
 
 
+
+
+@api_router.get("/arenas/{address}/refunds")
+async def get_arena_refunds(address: str):
+    refunds = await db.refunds.find({"arena_address": address}, {"_id": 0}).to_list(100)
+    return {"arena_address": address, "refunds": refunds}
 @api_router.get("/arenas/{address}/payouts")
 async def get_arena_payouts(address: str):
     payouts = await db.payouts.find({"arena_address": address}, {"_id": 0}).to_list(100)

@@ -29,6 +29,7 @@ const ArenaPage = () => {
   const [gameRules, setGameRules] = useState(null);
   const [showHowToPlay, setShowHowToPlay] = useState(false);
   const [gameCountdown, setGameCountdown] = useState(null);
+  const [idleCountdown, setIdleCountdown] = useState(null);
   const [gameStartTime, setGameStartTime] = useState(null);
 
   // ✅ MISSING STATE (you call setPendingTx but never defined it)
@@ -164,7 +165,26 @@ const ArenaPage = () => {
     return () => clearInterval(timer);
   }, [arena?.is_closed, arena?.game_status, arena?.closed_at]);
 
-  const handleJoin = async () => {
+  
+
+// Idle countdown timer (backend sets arena.idle_ends_at)
+useEffect(() => {
+  if (!arena?.idle_ends_at || arena?.is_closed || arena?.is_finalized) {
+    setIdleCountdown(null);
+    return;
+  }
+  const endsAt = new Date(arena.idle_ends_at);
+  const updateIdleCountdown = () => {
+    const now = new Date();
+    const remaining = Math.max(0, Math.floor((endsAt - now) / 1000));
+    setIdleCountdown(remaining);
+  };
+  updateIdleCountdown();
+  const t = setInterval(updateIdleCountdown, 250);
+  return () => clearInterval(t);
+}, [arena?.idle_ends_at, arena?.is_closed, arena?.is_finalized]);
+
+const handleJoin = async () => {
     if (!isConnected) {
       await connect();
       return;
@@ -528,7 +548,46 @@ const ArenaPage = () => {
         )}
 
         {/* Join Button */}
-        {canJoin && (
+        
+
+{/* Idle timer banner */}
+{idleCountdown !== null && !arena?.is_closed && !arena?.is_finalized && !arena?.is_cancelled && (
+  <div className="mb-4 p-4 rounded-xl border border-orange-200 bg-orange-50 flex items-center gap-3">
+    <Timer className="w-5 h-5 text-orange-500" />
+    <div className="text-sm text-orange-900">
+      Waiting for more players… <span className="font-semibold">{idleCountdown}s</span> left before this arena is cancelled and refunded.
+    </div>
+  </div>
+)}
+
+{/* Cancelled / refunded banner */}
+{arena?.is_cancelled && (
+  <div className="mb-4 p-4 rounded-xl border border-amber-200 bg-amber-50">
+    <div className="flex items-center gap-2 mb-1">
+      <AlertTriangle className="w-5 h-5 text-amber-600" />
+      <div className="font-semibold text-amber-900">Arena cancelled</div>
+    </div>
+    <div className="text-sm text-amber-900">
+      Not enough players joined before the timer expired. Your entry fee is being refunded.
+      {arena?.refund_tx_hash && (
+        <>
+          {" "}
+          <a
+            className="underline"
+            href={getExplorerUrl(arena.network, arena.refund_tx_hash)}
+            target="_blank"
+            rel="noreferrer"
+          >
+            View refund tx
+          </a>
+          .
+        </>
+      )}
+    </div>
+  </div>
+)}
+
+{canJoin && (
           <div className="bg-gradient-to-r from-purple-50 to-white rounded-2xl p-6 border border-purple-100 mb-8">
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
               <div>

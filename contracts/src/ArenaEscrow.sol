@@ -38,6 +38,7 @@ contract ArenaEscrow {
     event Finalized(address[] winners, uint256[] amounts, bytes32 txId);
     event Payout(address indexed winner, uint256 amount);
     event ProofMinted(address indexed winner, uint256 tokenId);
+    event CancelledAndRefunded(address[] players, uint256 amountEach);
     
     // ============ Modifiers ============
     
@@ -85,7 +86,33 @@ contract ArenaEscrow {
     
     // ============ Admin Functions ============
     
-    function closeRegistration() external onlyFactoryOwner {
+    
+
+/**
+ * @notice Cancel tournament and refund players if not enough players joined (0 or 1).
+ * @dev Callable by factory owner (operator). Marks arena closed & finalized to prevent reuse.
+ */
+function cancelAndRefund() external onlyFactoryOwner {
+    require(!isFinalized, "Already finalized");
+    require(players.length < 2, "Enough players");
+
+    // Effects
+    isClosed = true;
+    isFinalized = true;
+
+    uint256 amountEach = entryFee;
+    uint256 n = players.length;
+
+    // Interactions
+    for (uint256 i = 0; i < n; i++) {
+        address p = players[i];
+        (bool ok, ) = p.call{value: amountEach}("");
+        require(ok, "Refund failed");
+    }
+
+    emit CancelledAndRefunded(players, amountEach);
+}
+function closeRegistration() external onlyFactoryOwner {
         require(!isClosed, "Already closed");
         require(!isFinalized, "Already finalized");
         
