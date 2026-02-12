@@ -774,22 +774,22 @@ class AutonomousAgent:
                 # Use actual game results
                 game_state = self.game_engine.finish_game(game_id)
                 if game_state and game_state.winners:
-                    winners = game_state.winners[:2]
+                    winners = game_state.winners[:1]
                     logger.info(f"   Game finished! Winners determined by gameplay.")
                 else:
                     # Fallback if game state is incomplete
-                    winners = random.sample(players, min(2, len(players)))
+                    winners = random.sample(players, min(1, len(players)))
                     logger.info(f"   Using fallback winner selection.")
             else:
                 # No active game session - winners determined by game that was played
                 # Check for stored game results
                 game_results = arena.get('game_results', {})
                 if game_results.get('winners'):
-                    winners = game_results['winners'][:2]
+                    winners = game_results['winners'][:1]
                     logger.info(f"   Using stored game results.")
                 else:
                     # Fallback: random selection (shouldn't happen in production)
-                    winners = random.sample(players, min(2, len(players)))
+                    winners = random.sample(players, min(1, len(players)))
                     logger.info(f"   No game results found, using fallback.")
 
             # Calculate prize distribution
@@ -797,14 +797,8 @@ class AutonomousAgent:
             protocol_fee = total_pool * arena.get('protocol_fee_bps', 250) // 10000
             prize_pool = total_pool - protocol_fee
 
-            # Prize split: 1st = 70%, 2nd = 30%
-            if len(winners) >= 2:
-                amounts = [
-                    str(int(prize_pool * 0.7)),
-                    str(int(prize_pool * 0.3))
-                ]
-            else:
-                amounts = [str(prize_pool)]
+            # Winner-takes-all policy after protocol fee.
+            amounts = [str(prize_pool)]
 
             logger.info(f"   Winners: {[w[:10] + '...' for w in winners]}")
             logger.info(f"   Prizes: {[f'{int(a)/1e18:.4f} MON' for a in amounts]}")

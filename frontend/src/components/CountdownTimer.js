@@ -10,6 +10,7 @@ import { Clock, Timer } from 'lucide-react';
  * - onComplete: Callback when countdown reaches zero
  * - variant: "banner" | "inline" | "card" (styling variant)
  * - showIcon: Whether to show the clock icon (default true)
+ * - completedText: Text to show when countdown reaches zero
  */
 const CountdownTimer = ({
   targetTime,
@@ -17,6 +18,7 @@ const CountdownTimer = ({
   onComplete,
   variant = 'inline',
   showIcon = true,
+  completedText = 'Now',
 }) => {
   const [timeLeft, setTimeLeft] = useState(null);
 
@@ -85,7 +87,7 @@ const CountdownTimer = ({
                 isUrgent ? 'text-orange-600' : 'text-[#836EF9]'
               }`}
             >
-              {timeLeft <= 0 ? 'Starting...' : timeDisplay}
+              {timeLeft <= 0 ? completedText : timeDisplay}
             </p>
           </div>
         </div>
@@ -110,7 +112,7 @@ const CountdownTimer = ({
             isUrgent ? 'text-orange-600' : 'text-gray-900'
           }`}
         >
-          {timeLeft <= 0 ? 'Now' : timeDisplay}
+          {timeLeft <= 0 ? completedText : timeDisplay}
         </p>
       </div>
     );
@@ -125,7 +127,7 @@ const CountdownTimer = ({
       data-testid="countdown-inline"
     >
       {showIcon && <Clock className="w-3.5 h-3.5" />}
-      {timeLeft <= 0 ? 'Now' : timeDisplay}
+      {timeLeft <= 0 ? completedText : timeDisplay}
     </span>
   );
 };

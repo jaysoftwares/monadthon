@@ -20,6 +20,9 @@ const ArenaCard = ({ arena }) => {
     if (arena.is_finalized) {
       return <Badge className="bg-gray-100 text-gray-600" data-testid={`arena-status-${arena.address}`}>Finalized</Badge>;
     }
+    if (arena.game_status === 'finished') {
+      return <Badge className="bg-blue-100 text-blue-700" data-testid={`arena-status-${arena.address}`}>Ended</Badge>;
+    }
     if (arena.is_closed) {
       return <Badge className="bg-red-100 text-red-600" data-testid={`arena-status-${arena.address}`}>Closed</Badge>;
     }

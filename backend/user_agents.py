@@ -725,9 +725,12 @@ class UserAgentManager:
                 entry_fee = int(arena_response.json().get("entry_fee", "0"))
             earnings = 0
             if rank == 1:
-                earnings = int(entry_fee * 1.7)  # 70% of pool
-            elif rank == 2:
-                earnings = int(entry_fee * 0.3)  # 30% of pool
+                arena_info = arena_response.json() if arena_response.status_code == 200 else {}
+                players_joined = len(arena_info.get("players", []))
+                protocol_fee_bps = int(arena_info.get("protocol_fee_bps", 250))
+                total_pool = entry_fee * players_joined
+                protocol_fee = total_pool * protocol_fee_bps // 10000
+                earnings = max(0, total_pool - protocol_fee)
 
             # Update agent stats
             new_total_games = agent.total_games + 1

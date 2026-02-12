@@ -273,6 +273,9 @@ useEffect(() => {
     if (arena?.is_finalized) {
       return <Badge className="badge-finalized text-base px-4 py-1">Finalized</Badge>;
     }
+    if (arena?.game_status === 'finished') {
+      return <Badge className="badge-closed text-base px-4 py-1">Ended</Badge>;
+    }
     if (arena?.is_closed) {
       return <Badge className="badge-closed text-base px-4 py-1">Registration Closed</Badge>;
     }
@@ -534,6 +537,7 @@ useEffect(() => {
               targetTime={arena.tournament_end_estimate}
               label="Tournament Ends In"
               variant="banner"
+              completedText="Ended"
             />
           </div>
         )}

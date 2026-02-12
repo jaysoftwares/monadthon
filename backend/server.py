@@ -587,6 +587,7 @@ class ArenaTimerManager:
             if not winners:
                 logger.warning(f"Game {game_id} has no winners")
                 return
+            payout_winners = winners[:1]
 
             player_scores = {p.address: p.score for p in game.players.values()}
 
@@ -599,39 +600,34 @@ class ArenaTimerManager:
             protocol_fee = int(total_pool * protocol_fee_bps / 10000)
             available_for_winners = total_pool - protocol_fee
 
-            payout_per_winner = available_for_winners // len(winners)
-            remainder = available_for_winners % len(winners)
-
-            payout_amounts = []
-            for i in range(len(winners)):
-                amount = payout_per_winner + (remainder if i == 0 else 0)
-                payout_amounts.append(str(amount))
+            # Winner-takes-all policy: all post-fee funds go to rank #1.
+            payout_amounts = [str(available_for_winners)]
 
             await db.arenas.update_one(
                 {"address": arena_address},
                 {
                     "$set": {
                         "game_status": "finished",
-                        "winners": winners,
+                        "winners": payout_winners,
                         "payouts": payout_amounts,
                         "game_results": {
                             "winners": winners,
+                            "payout_winners": payout_winners,
                             "player_scores": player_scores,
                             "total_pool": str(total_pool),
                             "protocol_fee": str(protocol_fee),
-                            "payout_per_winner": str(payout_per_winner),
-                            "remainder": str(remainder),
+                            "payout_policy": "winner_takes_all_after_fee",
                             "finished_at": datetime.now(timezone.utc).isoformat(),
                         },
                     }
                 },
             )
 
-            for winner, amount in zip(winners, payout_amounts):
+            for winner, amount in zip(payout_winners, payout_amounts):
                 payout = PayoutRecord(arena_address=arena_address, winner_address=winner, amount=amount, tx_hash="")
                 await db.payouts.insert_one(payout.model_dump())
 
-            for winner, amount in zip(winners, payout_amounts):
+            for winner, amount in zip(payout_winners, payout_amounts):
                 current = await db.leaderboard.find_one({"address": winner})
                 current_payouts = int(current.get("total_payouts", "0")) if current else 0
                 new_payouts = current_payouts + int(amount)
@@ -644,7 +640,7 @@ class ArenaTimerManager:
 
             try:
                 network = arena.get("network", os.environ.get("DEFAULT_NETWORK", "testnet"))
-                finalize_tx = await _finalize_onchain(arena_address, winners, payout_amounts, network)
+                finalize_tx = await _finalize_onchain(arena_address, payout_winners, payout_amounts, network)
                 await db.arenas.update_one(
                     {"address": arena_address},
                     {
@@ -660,7 +656,7 @@ class ArenaTimerManager:
             except Exception as e:
                 logger.error(f"On-chain finalization failed for arena {arena_address}: {e}")
 
-            logger.info(f"Processed winners for arena {arena_address}: {winners}, payouts: {payout_amounts}")
+            logger.info(f"Processed winners for arena {arena_address}: {payout_winners}, payouts: {payout_amounts}")
 
         except Exception as e:
             logger.error(f"Error processing game winners for {arena_address}: {e}")
@@ -1545,6 +1541,7 @@ async def process_winners(address: str, _: bool = Depends(verify_admin_key)):
     winners = game.winners if game.winners else []
     if not winners:
         raise HTTPException(status_code=400, detail="No winners determined by game engine")
+    payout_winners = winners[:1]
 
     entry_fee = int(arena.get("entry_fee", "0"))
     protocol_fee_bps = int(arena.get("protocol_fee_bps", 250))
@@ -1554,50 +1551,40 @@ async def process_winners(address: str, _: bool = Depends(verify_admin_key)):
     total_pool = entry_fee * player_count
     protocol_fee = int(total_pool * protocol_fee_bps / 10000)
     available_for_winners = total_pool - protocol_fee
-
-    payout_per_winner = available_for_winners // len(winners) if winners else 0
-    remainder = available_for_winners % len(winners) if winners else 0
-
-    payouts = []
-    payout_amounts = []
-    for i, winner in enumerate(winners):
-        amount = payout_per_winner
-        if i == 0:
-            amount += remainder
-        payouts.append(winner)
-        payout_amounts.append(str(amount))
+    payout_amounts = [str(available_for_winners)]
 
     await db.arenas.update_one(
         {"address": address},
         {
             "$set": {
-                "winners": payouts,
+                "winners": payout_winners,
                 "payouts": payout_amounts,
                 "game_results": {
                     "winners": game.winners,
+                    "payout_winners": payout_winners,
                     "player_scores": {p.address: p.score for p in game.players.values()},
                     "total_pool": str(total_pool),
                     "protocol_fee": str(protocol_fee),
-                    "payout_per_winner": str(payout_per_winner),
+                    "payout_policy": "winner_takes_all_after_fee",
                 },
             }
         },
     )
 
-    for winner, amount in zip(payouts, payout_amounts):
+    for winner, amount in zip(payout_winners, payout_amounts):
         payout = PayoutRecord(arena_address=address, winner_address=winner, amount=amount, tx_hash="")
         await db.payouts.insert_one(payout.model_dump())
 
-    logger.info(f"Processed winners for arena {address}: {payouts}")
+    logger.info(f"Processed winners for arena {address}: {payout_winners}")
 
     return {
         "success": True,
         "arena_address": address,
-        "winners": payouts,
+        "winners": payout_winners,
         "payouts": payout_amounts,
         "total_pool": str(total_pool),
         "protocol_fee": str(protocol_fee),
-        "payout_per_winner": str(payout_per_winner),
+        "payout_policy": "winner_takes_all_after_fee",
         "message": "Winners processed successfully",
     }
 
