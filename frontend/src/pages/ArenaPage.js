@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { getArena, joinArena, formatMON, getExplorerUrl, getGameState, getGameRules } from '../services/api';
 import { useWallet } from '../context/WalletContext';
@@ -71,6 +71,12 @@ const ArenaPage = () => {
   // Track whether the arena was deleted (e.g. by idle timer refund)
   const [arenaDeleted, setArenaDeleted] = useState(false);
 
+  // ✅ Keep latest arena in a ref (fixes ESLint exhaustive-deps without changing behavior)
+  const arenaRef = useRef(null);
+  useEffect(() => {
+    arenaRef.current = arena;
+  }, [arena]);
+
   // Fetch arena and game state
   useEffect(() => {
     let stopped = false;
@@ -106,11 +112,13 @@ const ArenaPage = () => {
         if (stopped) return;
         // If the arena was previously loaded but now returns 404,
         // it was likely deleted by the idle timer (player refunded).
-        if (error?.response?.status === 404 && arena) {
+        // ✅ use ref instead of `arena` to avoid missing-deps lint error
+        if (error?.response?.status === 404 && arenaRef.current) {
           setArenaDeleted(true);
           return; // Stop polling – arena no longer exists
         }
-        if (!arena) {
+        // ✅ use ref instead of `arena` to keep behavior identical
+        if (!arenaRef.current) {
           // First load failed
           console.error('Failed to fetch arena:', error);
         }
