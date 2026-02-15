@@ -2161,16 +2161,20 @@ async def create_user_agent(request: CreateAgentRequest, owner_address: str = Qu
 
     user_agent_manager.db = db
 
-    agent = await user_agent_manager.create_agent(
-        owner_address=owner_address,
-        name=request.name,
-        strategy=strategy,
-        max_entry_fee_wei=request.max_entry_fee_wei,
-        min_entry_fee_wei=request.min_entry_fee_wei,
-        preferred_games=request.preferred_games,
-        auto_join=request.auto_join,
-        daily_budget_wei=request.daily_budget_wei,
-    )
+    try:
+        agent = await user_agent_manager.create_agent(
+            owner_address=owner_address,
+            name=request.name,
+            strategy=strategy,
+            max_entry_fee_wei=request.max_entry_fee_wei,
+            min_entry_fee_wei=request.min_entry_fee_wei,
+            preferred_games=request.preferred_games,
+            auto_join=request.auto_join,
+            daily_budget_wei=request.daily_budget_wei,
+        )
+    except Exception as e:
+        logger.exception("Failed to create user agent")
+        raise HTTPException(status_code=500, detail=f"Failed to create agent: {e}")
 
     return agent_to_response(agent)
 

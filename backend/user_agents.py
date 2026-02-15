@@ -113,6 +113,38 @@ class UserAgentManager:
         self.running_agents: Dict[str, asyncio.Task] = {}
         self.http_client: Optional[httpx.AsyncClient] = None
 
+    @staticmethod
+    def _safe_strategy(value: Any) -> AgentStrategy:
+        """Parse strategy safely; fallback to balanced for legacy/bad values."""
+        try:
+            return AgentStrategy(str(value).lower())
+        except Exception:
+            return AgentStrategy.BALANCED
+
+    @staticmethod
+    def _safe_status(value: Any) -> AgentStatus:
+        """Parse status safely; fallback to paused for unknown legacy values."""
+        raw = str(value).lower()
+        aliases = {
+            "playing": AgentStatus.IN_GAME,
+            "in-game": AgentStatus.IN_GAME,
+            "running": AgentStatus.ACTIVE,
+        }
+        if raw in aliases:
+            return aliases[raw]
+        try:
+            return AgentStatus(raw)
+        except Exception:
+            return AgentStatus.PAUSED
+
+    @staticmethod
+    def _safe_mode(value: Any) -> AgentMode:
+        """Parse mode safely; fallback to auto_play."""
+        try:
+            return AgentMode(str(value).lower())
+        except Exception:
+            return AgentMode.AUTO_PLAY
+
     async def start(self):
         """Start the agent manager"""
         self.http_client = httpx.AsyncClient(timeout=30.0)
@@ -227,12 +259,9 @@ class UserAgentManager:
             data.pop('_id', None)
             data = await self._ensure_agent_wallet(data)
             # Convert string enums back
-            data['strategy'] = AgentStrategy(data['strategy'])
-            data['status'] = AgentStatus(data['status'])
-            if 'mode' in data:
-                data['mode'] = AgentMode(data['mode'])
-            else:
-                data['mode'] = AgentMode.AUTO_PLAY  # Default for old agents
+            data['strategy'] = self._safe_strategy(data.get('strategy'))
+            data['status'] = self._safe_status(data.get('status'))
+            data['mode'] = self._safe_mode(data.get('mode'))
             return AgentConfig(**data)
         return None
 
@@ -244,15 +273,15 @@ class UserAgentManager:
         agents = []
         cursor = self.db.user_agents.find({"owner_address": owner_address.lower()})
         async for data in cursor:
-            data.pop('_id', None)
-            data = await self._ensure_agent_wallet(data)
-            data['strategy'] = AgentStrategy(data['strategy'])
-            data['status'] = AgentStatus(data['status'])
-            if 'mode' in data:
-                data['mode'] = AgentMode(data['mode'])
-            else:
-                data['mode'] = AgentMode.AUTO_PLAY
-            agents.append(AgentConfig(**data))
+            try:
+                data.pop('_id', None)
+                data = await self._ensure_agent_wallet(data)
+                data['strategy'] = self._safe_strategy(data.get('strategy'))
+                data['status'] = self._safe_status(data.get('status'))
+                data['mode'] = self._safe_mode(data.get('mode'))
+                agents.append(AgentConfig(**data))
+            except Exception as e:
+                logger.error(f"Skipping invalid agent record in owner list: {e}")
         return agents
 
     async def get_all_active_agents(self) -> List[AgentConfig]:
@@ -265,15 +294,17 @@ class UserAgentManager:
             {"status": {"$in": [AgentStatus.ACTIVE.value, AgentStatus.IN_GAME.value]}}
         )
         async for data in cursor:
-            data.pop('_id', None)
-            data = await self._ensure_agent_wallet(data)
-            data['strategy'] = AgentStrategy(data['strategy'])
-            data['status'] = AgentStatus(data['status'])
-            if 'mode' in data:
-                data['mode'] = AgentMode(data['mode'])
-            else:
-                data['mode'] = AgentMode.AUTO_PLAY
-            agents.append(AgentConfig(**data))
+            try:
+                data.pop('_id', None)
+                data = await self._ensure_agent_wallet(data)
+                data['strategy'] = self._safe_strategy(data.get('strategy'))
+                data['status'] = self._safe_status(data.get('status'))
+                data['mode'] = self._safe_mode(data.get('mode'))
+                # Restart only actionable agents.
+                if data['status'] in (AgentStatus.ACTIVE, AgentStatus.IN_GAME):
+                    agents.append(AgentConfig(**data))
+            except Exception as e:
+                logger.error(f"Skipping invalid active-agent record: {e}")
         return agents
 
     async def update_agent(self, agent_id: str, updates: Dict) -> bool:
