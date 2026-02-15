@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useWallet } from '../context/WalletContext';
-import { Bot, Play, Pause, Trash2, Plus, Settings, TrendingUp, TrendingDown, Activity } from 'lucide-react';
+import { Bot, Play, Pause, Trash2, Plus, Copy, TrendingUp, TrendingDown, RefreshCw, ArrowUpRight } from 'lucide-react';
 
 const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
@@ -19,6 +19,7 @@ const UserAgents = () => {
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [error, setError] = useState(null);
+  const [walletInfo, setWalletInfo] = useState({});
 
   // New agent form state
   const [newAgent, setNewAgent] = useState({
@@ -50,9 +51,45 @@ const UserAgents = () => {
     }
   }, [address]);
 
+  const fetchAgentWallet = useCallback(async (agentId) => {
+    if (!address || !agentId) return;
+
+    setWalletInfo((prev) => ({
+      ...prev,
+      [agentId]: { ...(prev[agentId] || {}), loading: true, error: null },
+    }));
+
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/agents/${agentId}/wallet?owner_address=${address}`
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || 'Failed to fetch wallet');
+      }
+
+      setWalletInfo((prev) => ({
+        ...prev,
+        [agentId]: { ...data, loading: false, error: null },
+      }));
+    } catch (err) {
+      setWalletInfo((prev) => ({
+        ...prev,
+        [agentId]: { ...(prev[agentId] || {}), loading: false, error: err.message },
+      }));
+    }
+  }, [address]);
+
   useEffect(() => {
     fetchAgents();
   }, [fetchAgents]);
+
+  useEffect(() => {
+    if (!address || agents.length === 0) return;
+    agents.forEach((agent) => {
+      if (agent?.agent_id) fetchAgentWallet(agent.agent_id);
+    });
+  }, [address, agents, fetchAgentWallet]);
 
   // Create agent
   const createAgent = async () => {
@@ -70,7 +107,7 @@ const UserAgents = () => {
 
       if (response.ok) {
         const agent = await response.json();
-        setAgents([...agents, agent]);
+        setAgents((prev) => [...prev, agent]);
         setShowCreateModal(false);
         setNewAgent({
           name: '',
@@ -119,7 +156,12 @@ const UserAgents = () => {
       );
 
       if (response.ok) {
-        setAgents(agents.filter(a => a.agent_id !== agentId));
+        setAgents((prev) => prev.filter(a => a.agent_id !== agentId));
+        setWalletInfo((prev) => {
+          const next = { ...prev };
+          delete next[agentId];
+          return next;
+        });
       }
     } catch (err) {
       console.error('Error deleting agent:', err);
@@ -131,6 +173,69 @@ const UserAgents = () => {
     return (BigInt(wei) / BigInt(10 ** 18)).toString() +
            '.' +
            (BigInt(wei) % BigInt(10 ** 18)).toString().padStart(18, '0').slice(0, 4);
+  };
+
+  const parseMONToWei = (monValue) => {
+    const normalized = String(monValue || '').trim();
+    if (!normalized) throw new Error('Amount is required');
+    const [whole, fraction = ''] = normalized.split('.');
+    if (!/^\d+$/.test(whole || '0') || !/^\d*$/.test(fraction)) {
+      throw new Error('Invalid MON amount');
+    }
+
+    const weiWhole = BigInt(whole || '0') * (10n ** 18n);
+    const weiFraction = BigInt((fraction + '0'.repeat(18)).slice(0, 18) || '0');
+    return (weiWhole + weiFraction).toString();
+  };
+
+  const copyWalletAddress = async (walletAddress) => {
+    if (!walletAddress) return;
+    try {
+      await navigator.clipboard.writeText(walletAddress);
+    } catch (_) {
+      setError('Failed to copy wallet address');
+    }
+  };
+
+  const withdrawFromAgent = async (agent) => {
+    if (!agent?.agent_id || !address) return;
+
+    const toAddress = window.prompt('Withdraw to wallet address:', address);
+    if (!toAddress) return;
+
+    const amountMon = window.prompt('Amount to withdraw (MON):', '0.01');
+    if (!amountMon) return;
+
+    let amountWei;
+    try {
+      amountWei = parseMONToWei(amountMon);
+    } catch (err) {
+      setError(err.message || 'Invalid amount');
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/agents/${agent.agent_id}/withdraw?owner_address=${address}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            to_address: toAddress,
+            amount_wei: amountWei,
+          }),
+        }
+      );
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || 'Withdraw failed');
+      }
+
+      await fetchAgentWallet(agent.agent_id);
+    } catch (err) {
+      setError(err.message || 'Withdraw failed');
+    }
   };
 
   if (!isConnected) {
@@ -258,6 +363,53 @@ const UserAgents = () => {
                     {agent.preferred_games.join(', ')}
                   </span>
                 )}
+              </div>
+
+              {/* Agent wallet */}
+              <div className="bg-gray-50 border border-gray-100 rounded-lg p-3 mb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs font-medium text-gray-600">Agent Wallet</p>
+                  <button
+                    onClick={() => fetchAgentWallet(agent.agent_id)}
+                    className="text-xs text-gray-500 hover:text-gray-700 inline-flex items-center gap-1"
+                    title="Refresh balance"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${walletInfo[agent.agent_id]?.loading ? 'animate-spin' : ''}`} />
+                    Refresh
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 mb-2">
+                  <code className="text-xs text-gray-700 break-all flex-1">
+                    {agent.wallet_address || 'Wallet unavailable'}
+                  </code>
+                  <button
+                    onClick={() => copyWalletAddress(agent.wallet_address)}
+                    disabled={!agent.wallet_address}
+                    className="p-1 rounded bg-white border border-gray-200 text-gray-600 hover:bg-gray-100 disabled:opacity-40"
+                    title="Copy wallet address"
+                  >
+                    <Copy className="w-3 h-3" />
+                  </button>
+                </div>
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-gray-500">
+                    Balance:{' '}
+                    {walletInfo[agent.agent_id]?.loading
+                      ? '...'
+                      : `${walletInfo[agent.agent_id]?.balance_mon || '0.000000'} MON`}
+                  </p>
+                  <button
+                    onClick={() => withdrawFromAgent(agent)}
+                    disabled={!agent.wallet_address}
+                    className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded bg-purple-100 text-purple-700 hover:bg-purple-200 disabled:opacity-50"
+                  >
+                    <ArrowUpRight className="w-3 h-3" />
+                    Withdraw
+                  </button>
+                </div>
+                <p className="text-[11px] text-gray-400 mt-2">
+                  Fund this wallet from your main wallet so the agent can auto-join tournaments.
+                </p>
               </div>
 
               {/* Stats */}

@@ -30,6 +30,7 @@ ARENA_ESCROW_ABI = [
     },
     {"inputs": [], "name": "closeRegistration", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
     {"inputs": [], "name": "cancelAndRefund", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+    {"inputs": [], "name": "join", "outputs": [], "stateMutability": "payable", "type": "function"},
     {
         "inputs": [
             {"internalType": "address[]", "name": "winners", "type": "address[]"},
@@ -735,6 +736,101 @@ async def _cancel_and_refund_onchain(arena_address: str, network: str) -> str:
             "chainId": config.chain_id,
         }
     )
+    signed = acct.sign_transaction(tx)
+    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    return tx_hash.hex()
+
+
+def _get_wallet_balance_wei(address: str, network: str) -> int:
+    config = get_network_config(network)
+    if not config.rpc_url:
+        raise RuntimeError(f"RPC URL not configured for network={network}")
+
+    w3 = Web3(Web3.HTTPProvider(config.rpc_url))
+    return int(w3.eth.get_balance(Web3.to_checksum_address(address)))
+
+
+async def _agent_join_onchain(arena_address: str, entry_fee_wei: str, network: str, agent_private_key: str) -> str:
+    """Submit join() on-chain from agent wallet and wait for confirmation."""
+    config = get_network_config(network)
+    if not config.rpc_url:
+        raise RuntimeError(f"RPC URL not configured for network={network}")
+
+    w3 = Web3(Web3.HTTPProvider(config.rpc_url))
+    acct = Account.from_key(agent_private_key)
+    contract = w3.eth.contract(address=Web3.to_checksum_address(arena_address), abi=ARENA_ESCROW_ABI)
+    join_value = int(entry_fee_wei)
+    fn = contract.functions.join()
+
+    gas_price = int(w3.eth.gas_price)
+    try:
+        estimated_gas = int(fn.estimate_gas({"from": acct.address, "value": join_value}) * 1.25)
+    except Exception:
+        estimated_gas = 300000
+
+    balance = int(w3.eth.get_balance(acct.address))
+    total_required = join_value + (estimated_gas * gas_price)
+    if balance < total_required:
+        raise ValueError(
+            f"Agent wallet has insufficient balance. "
+            f"Need {total_required} wei, has {balance} wei."
+        )
+
+    tx = fn.build_transaction(
+        {
+            "from": acct.address,
+            "nonce": w3.eth.get_transaction_count(acct.address),
+            "gas": estimated_gas,
+            "gasPrice": gas_price,
+            "value": join_value,
+            "chainId": int(w3.eth.chain_id),
+        }
+    )
+    signed = acct.sign_transaction(tx)
+    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+    if int(receipt.get("status", 0)) != 1:
+        raise RuntimeError(f"Agent join tx reverted for arena {arena_address}")
+
+    return tx_hash.hex()
+
+
+async def _agent_withdraw_native(
+    from_private_key: str,
+    to_address: str,
+    amount_wei: str,
+    network: str,
+) -> str:
+    """Send native MON from agent wallet to destination wallet."""
+    config = get_network_config(network)
+    if not config.rpc_url:
+        raise RuntimeError(f"RPC URL not configured for network={network}")
+
+    w3 = Web3(Web3.HTTPProvider(config.rpc_url))
+    acct = Account.from_key(from_private_key)
+    to_checksum = Web3.to_checksum_address(to_address)
+    value = int(amount_wei)
+    if value <= 0:
+        raise ValueError("Withdrawal amount must be greater than 0")
+
+    gas_limit = 21000
+    gas_price = int(w3.eth.gas_price)
+    balance = int(w3.eth.get_balance(acct.address))
+    total_required = value + (gas_limit * gas_price)
+    if balance < total_required:
+        raise ValueError(
+            f"Insufficient agent wallet balance. Need {total_required} wei including gas, has {balance} wei."
+        )
+
+    tx = {
+        "from": acct.address,
+        "to": to_checksum,
+        "value": value,
+        "nonce": w3.eth.get_transaction_count(acct.address),
+        "gas": gas_limit,
+        "gasPrice": gas_price,
+        "chainId": int(w3.eth.chain_id),
+    }
     signed = acct.sign_transaction(tx)
     tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
     return tx_hash.hex()
@@ -1986,6 +2082,7 @@ class AgentResponse(BaseModel):
     agent_id: str
     owner_address: str
     name: str
+    wallet_address: Optional[str] = None
     strategy: str
     max_entry_fee_wei: str
     min_entry_fee_wei: str
@@ -2004,6 +2101,19 @@ class AgentResponse(BaseModel):
     net_profit_wei: str = "0"
 
 
+class AgentWalletResponse(BaseModel):
+    agent_id: str
+    wallet_address: str
+    network: str
+    balance_wei: str
+    balance_mon: str
+
+
+class AgentWithdrawRequest(BaseModel):
+    to_address: str
+    amount_wei: str
+
+
 def agent_to_response(agent: AgentConfig) -> AgentResponse:
     win_rate = (agent.total_wins / agent.total_games * 100) if agent.total_games > 0 else 0.0
     net_profit = int(agent.total_earnings_wei) - int(agent.total_spent_wei)
@@ -2012,6 +2122,7 @@ def agent_to_response(agent: AgentConfig) -> AgentResponse:
         agent_id=agent.agent_id,
         owner_address=agent.owner_address,
         name=agent.name,
+        wallet_address=agent.wallet_address,
         strategy=agent.strategy.value,
         max_entry_fee_wei=agent.max_entry_fee_wei,
         min_entry_fee_wei=agent.min_entry_fee_wei,
@@ -2144,6 +2255,94 @@ async def stop_agent(agent_id: str, owner_address: str = Query(..., description=
     return {"success": success, "status": "paused"}
 
 
+@api_router.get("/agents/{agent_id}/wallet", response_model=AgentWalletResponse)
+async def get_agent_wallet(
+    agent_id: str,
+    owner_address: str = Query(..., description="Owner wallet address for verification"),
+    network: str = Query(default=DEFAULT_NETWORK),
+):
+    get_network_config(network)
+    user_agent_manager.db = db
+    agent = await user_agent_manager.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.owner_address.lower() != owner_address.lower():
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if not agent.wallet_address:
+        raise HTTPException(status_code=400, detail="Agent wallet not initialized")
+
+    try:
+        balance_wei = _get_wallet_balance_wei(agent.wallet_address, network)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch wallet balance: {e}")
+
+    balance_mon = f"{balance_wei / 1e18:.6f}"
+    return AgentWalletResponse(
+        agent_id=agent.agent_id,
+        wallet_address=agent.wallet_address,
+        network=network,
+        balance_wei=str(balance_wei),
+        balance_mon=balance_mon,
+    )
+
+
+@api_router.post("/agents/{agent_id}/withdraw")
+async def withdraw_from_agent_wallet(
+    agent_id: str,
+    request: AgentWithdrawRequest,
+    owner_address: str = Query(..., description="Owner wallet address for verification"),
+    network: str = Query(default=DEFAULT_NETWORK),
+):
+    get_network_config(network)
+    user_agent_manager.db = db
+    agent = await user_agent_manager.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.owner_address.lower() != owner_address.lower():
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if not agent.wallet_private_key or not agent.wallet_address:
+        raise HTTPException(status_code=400, detail="Agent wallet is not configured")
+
+    try:
+        tx_hash = await _agent_withdraw_native(
+            from_private_key=agent.wallet_private_key,
+            to_address=request.to_address,
+            amount_wei=request.amount_wei,
+            network=network,
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Withdraw failed: {e}")
+
+    await db.agent_withdrawals.insert_one(
+        {
+            "agent_id": agent.agent_id,
+            "owner_address": agent.owner_address,
+            "from_address": agent.wallet_address,
+            "to_address": request.to_address,
+            "amount_wei": request.amount_wei,
+            "tx_hash": tx_hash,
+            "network": network,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    return {
+        "success": True,
+        "agent_id": agent.agent_id,
+        "from_address": agent.wallet_address,
+        "to_address": request.to_address,
+        "amount_wei": request.amount_wei,
+        "tx_hash": tx_hash,
+        "network": network,
+    }
+
+
 @api_router.get("/agents/{agent_id}/history")
 async def get_agent_history(agent_id: str, limit: int = Query(default=20, le=100)):
     user_agent_manager.db = db
@@ -2179,19 +2378,53 @@ async def join_arena_with_agent(address: str, agent_id: str = Query(...), owner_
         raise HTTPException(status_code=400, detail="Arena is closed")
 
     players = arena.get("players", [])
-    if len(players) >= arena.get("max_players", 8):
+    max_players = _normalize_max_players(arena.get("max_players", 8))
+    if arena.get("max_players") != max_players:
+        await db.arenas.update_one({"address": address}, {"$set": {"max_players": max_players}})
+
+    if len(players) >= max_players:
         raise HTTPException(status_code=400, detail="Arena is full")
 
-    agent_player_address = f"agent_{agent_id}"
+    if not agent.wallet_address or not agent.wallet_private_key:
+        raise HTTPException(status_code=400, detail="Agent wallet is not configured")
+
+    agent_player_address = agent.wallet_address
 
     if agent_player_address in players:
         raise HTTPException(status_code=400, detail="Agent already in arena")
 
-    await db.arenas.update_one({"address": address}, {"$push": {"players": agent_player_address}})
+    network = arena.get("network", DEFAULT_NETWORK)
+    entry_fee_wei = arena.get("entry_fee", "0")
 
-    logger.info(f"Agent {agent_id} joined arena {address}")
+    try:
+        join_tx_hash = await _agent_join_onchain(
+            arena_address=address,
+            entry_fee_wei=entry_fee_wei,
+            network=network,
+            agent_private_key=agent.wallet_private_key,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Agent failed to join on-chain: {e}")
 
-    return {"success": True, "agent_id": agent_id, "arena_address": address, "player_address": agent_player_address}
+    join_result = await join_arena(
+        JoinArena(
+            arena_address=address,
+            player_address=agent_player_address,
+            tx_hash=join_tx_hash,
+        )
+    )
+
+    logger.info(f"Agent {agent_id} joined arena {address} with wallet {agent_player_address}")
+
+    return {
+        **join_result,
+        "agent_id": agent_id,
+        "arena_address": address,
+        "player_address": agent_player_address,
+        "tx_hash": join_tx_hash,
+    }
 
 
 # ===========================================

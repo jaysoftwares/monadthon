@@ -38,12 +38,11 @@ from typing import List, Dict, Optional
 from dataclasses import dataclass
 from enum import Enum
 import random
-import hashlib
-import time
 import httpx
 from dotenv import load_dotenv
 
 from game_engine import GameType, GameEngine, GAME_RULES, get_game_rules_json, TournamentMode
+from contract_deployer import ContractDeployer
 
 load_dotenv()
 
@@ -443,6 +442,29 @@ class AutonomousAgent:
         self.game_engine = GameEngine()
         self.http_client: Optional[httpx.AsyncClient] = None
         self.running = False
+        self.operator_private_key = (
+            os.environ.get("ARENA_FACTORY_OWNER_PRIVATE_KEY", "")
+            or os.environ.get("DEPLOYER_PRIVATE_KEY", "")
+            or os.environ.get("OPERATOR_PRIVATE_KEY", "")
+        )
+        self.deployer: Optional[ContractDeployer] = None
+
+    def _ensure_deployer(self) -> bool:
+        """Ensure we have a connected ContractDeployer for ArenaFactory deployments."""
+        if self.deployer is not None:
+            return True
+
+        if not self.operator_private_key:
+            logger.error("OPERATOR_PRIVATE_KEY not set. Cannot deploy arenas via ArenaFactory.")
+            return False
+
+        deployer = ContractDeployer(DEFAULT_NETWORK)
+        if not deployer.connect(self.operator_private_key):
+            logger.error(f"Failed to connect ContractDeployer for network={DEFAULT_NETWORK}")
+            return False
+
+        self.deployer = deployer
+        return True
 
     async def start(self):
         """Start the autonomous agent"""
@@ -592,23 +614,19 @@ class AutonomousAgent:
         logger.info(f"   Reason: {config.reason}")
 
         try:
-            # Generate a placeholder contract address
-            # In production, this would come from actual contract deployment
-            placeholder = hashlib.sha256(f"{config.name}{time.time()}".encode()).hexdigest()
-            contract_address = f"0x{placeholder[:40]}"
-
             # Calculate timer timestamps
             now = datetime.now(timezone.utc)
+            registration_deadline_dt = now + timedelta(minutes=config.registration_deadline_minutes)
             registration_deadline = (
-                now + timedelta(minutes=config.registration_deadline_minutes)
+                registration_deadline_dt
             ).isoformat()
 
             # Learning phase starts after registration
             learning_phase_start = (
-                now + timedelta(minutes=config.registration_deadline_minutes)
+                registration_deadline_dt
             ).isoformat()
             learning_phase_end = (
-                now + timedelta(minutes=config.registration_deadline_minutes) +
+                registration_deadline_dt +
                 timedelta(seconds=config.learning_phase_seconds)
             ).isoformat()
 
@@ -617,6 +635,21 @@ class AutonomousAgent:
             tournament_end_estimate = (
                 now + timedelta(minutes=config.tournament_duration_minutes)
             ).isoformat()
+
+            if not self._ensure_deployer():
+                return False
+
+            registration_deadline_unix = int(registration_deadline_dt.timestamp())
+            contract_address = await self.deployer.deploy_arena(
+                name=config.name,
+                entry_fee_wei=int(config.entry_fee_wei),
+                max_players=config.max_players,
+                protocol_fee_bps=config.protocol_fee_bps,
+                registration_deadline=registration_deadline_unix,
+            )
+            if not contract_address:
+                logger.error("ArenaFactory deployment failed, skipping tournament creation")
+                return False
 
             response = await self.http_client.post(
                 f"{BACKEND_API_URL}/api/admin/arena/create",

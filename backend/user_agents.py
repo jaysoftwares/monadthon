@@ -25,6 +25,7 @@ from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 import httpx
+from eth_account import Account
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('user_agents')
@@ -62,6 +63,8 @@ class AgentConfig:
     max_entry_fee_wei: str              # Maximum entry fee willing to pay
     min_entry_fee_wei: str              # Minimum entry fee (skip tiny games)
     preferred_games: List[str]          # Game types to join (empty = all)
+    wallet_address: Optional[str] = None      # Dedicated wallet used by this agent
+    wallet_private_key: Optional[str] = None  # Server-managed key for autonomous txs
     auto_join: bool = True              # Automatically join matching tournaments
     max_concurrent_games: int = 1       # Max games to play simultaneously
     daily_budget_wei: str = "0"         # Daily spending limit (0 = unlimited)
@@ -156,11 +159,14 @@ class UserAgentManager:
         agent_id = hashlib.sha256(
             f"{owner_address}{time.time()}{random.random()}".encode()
         ).hexdigest()[:16]
+        wallet_account = Account.create()
 
         agent = AgentConfig(
             agent_id=agent_id,
             owner_address=owner_address.lower(),
             name=name,
+            wallet_address=wallet_account.address,
+            wallet_private_key=wallet_account.key.hex(),
             strategy=strategy,
             max_entry_fee_wei=max_entry_fee_wei,
             min_entry_fee_wei=min_entry_fee_wei,
@@ -186,6 +192,31 @@ class UserAgentManager:
 
         return agent
 
+    async def _ensure_agent_wallet(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Backfill wallet fields for agents created before wallet support."""
+        if data.get("wallet_address") and data.get("wallet_private_key"):
+            return data
+
+        wallet_account = Account.create()
+        wallet_address = wallet_account.address
+        wallet_private_key = wallet_account.key.hex()
+
+        if self.db is not None and data.get("agent_id"):
+            await self.db.user_agents.update_one(
+                {"agent_id": data["agent_id"]},
+                {"$set": {"wallet_address": wallet_address, "wallet_private_key": wallet_private_key}},
+            )
+
+        data["wallet_address"] = wallet_address
+        data["wallet_private_key"] = wallet_private_key
+        logger.info(f"Backfilled wallet for legacy agent {data.get('agent_id')}")
+        return data
+
+    @staticmethod
+    def _player_address(agent: AgentConfig) -> str:
+        """Use wallet address as player identity; fallback keeps legacy agents functional."""
+        return agent.wallet_address or f"agent_{agent.agent_id}"
+
     async def get_agent(self, agent_id: str) -> Optional[AgentConfig]:
         """Get an agent by ID"""
         if self.db is None:
@@ -194,6 +225,7 @@ class UserAgentManager:
         data = await self.db.user_agents.find_one({"agent_id": agent_id})
         if data:
             data.pop('_id', None)
+            data = await self._ensure_agent_wallet(data)
             # Convert string enums back
             data['strategy'] = AgentStrategy(data['strategy'])
             data['status'] = AgentStatus(data['status'])
@@ -213,6 +245,7 @@ class UserAgentManager:
         cursor = self.db.user_agents.find({"owner_address": owner_address.lower()})
         async for data in cursor:
             data.pop('_id', None)
+            data = await self._ensure_agent_wallet(data)
             data['strategy'] = AgentStrategy(data['strategy'])
             data['status'] = AgentStatus(data['status'])
             if 'mode' in data:
@@ -231,6 +264,7 @@ class UserAgentManager:
         cursor = self.db.user_agents.find({"status": AgentStatus.ACTIVE.value})
         async for data in cursor:
             data.pop('_id', None)
+            data = await self._ensure_agent_wallet(data)
             data['strategy'] = AgentStrategy(data['strategy'])
             data['status'] = AgentStatus(data['status'])
             if 'mode' in data:
@@ -246,7 +280,7 @@ class UserAgentManager:
             return False
 
         # Don't allow updating certain fields
-        protected_fields = ['agent_id', 'owner_address', 'created_at']
+        protected_fields = ['agent_id', 'owner_address', 'created_at', 'wallet_address', 'wallet_private_key']
         for field in protected_fields:
             updates.pop(field, None)
 
@@ -373,7 +407,7 @@ class UserAgentManager:
                     continue
 
                 # Check if agent is already in this arena
-                agent_address = f"agent_{agent.agent_id}"
+                agent_address = self._player_address(agent)
                 if agent_address in players:
                     continue
 
@@ -474,7 +508,7 @@ class UserAgentManager:
 
     async def _play_blackjack(self, agent: AgentConfig, arena_address: str):
         """Play blackjack using strategy"""
-        agent_address = f"agent_{agent.agent_id}"
+        agent_address = self._player_address(agent)
 
         while True:
             # Get current game state
@@ -546,7 +580,7 @@ class UserAgentManager:
 
     async def _play_claw(self, agent: AgentConfig, arena_address: str):
         """Play claw machine"""
-        agent_address = f"agent_{agent.agent_id}"
+        agent_address = self._player_address(agent)
 
         for _ in range(5):  # 5 attempts
             response = await self.http_client.get(
@@ -598,7 +632,7 @@ class UserAgentManager:
 
     async def _play_prediction(self, agent: AgentConfig, arena_address: str):
         """Play prediction game"""
-        agent_address = f"agent_{agent.agent_id}"
+        agent_address = self._player_address(agent)
 
         for round_num in range(3):  # 3 rounds
             response = await self.http_client.get(
@@ -638,7 +672,7 @@ class UserAgentManager:
 
     async def _play_speed(self, agent: AgentConfig, arena_address: str):
         """Play speed challenge"""
-        agent_address = f"agent_{agent.agent_id}"
+        agent_address = self._player_address(agent)
 
         for _ in range(10):  # 10 challenges
             response = await self.http_client.get(
@@ -709,7 +743,7 @@ class UserAgentManager:
 
             leaderboard_payload = response.json()
             leaderboard = leaderboard_payload.get("leaderboard", [])
-            agent_address = f"agent_{agent.agent_id}"
+            agent_address = self._player_address(agent)
 
             # Find agent's result
             rank = 0
