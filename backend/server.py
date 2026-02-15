@@ -686,6 +686,16 @@ def _get_operator_account() -> Account:
     return Account.from_key(pk)
 
 
+def _signed_raw_tx_bytes(signed_tx) -> bytes:
+    """Web3 version compatibility: SignedTransaction may expose rawTransaction or raw_transaction."""
+    raw_tx = getattr(signed_tx, "rawTransaction", None)
+    if raw_tx is None:
+        raw_tx = getattr(signed_tx, "raw_transaction", None)
+    if raw_tx is None:
+        raise RuntimeError("Signed transaction missing raw tx bytes")
+    return raw_tx
+
+
 def _send_contract_tx(w3: Web3, contract, fn, account: Account, value_wei: int = 0) -> str:
     nonce = w3.eth.get_transaction_count(account.address)
     tx = fn.build_transaction(
@@ -699,7 +709,7 @@ def _send_contract_tx(w3: Web3, contract, fn, account: Account, value_wei: int =
         }
     )
     signed = account.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    tx_hash = w3.eth.send_raw_transaction(_signed_raw_tx_bytes(signed))
     return tx_hash.hex()
 
 
@@ -737,7 +747,7 @@ async def _cancel_and_refund_onchain(arena_address: str, network: str) -> str:
         }
     )
     signed = acct.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    tx_hash = w3.eth.send_raw_transaction(_signed_raw_tx_bytes(signed))
     return tx_hash.hex()
 
 
@@ -787,7 +797,7 @@ async def _agent_join_onchain(arena_address: str, entry_fee_wei: str, network: s
         }
     )
     signed = acct.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    tx_hash = w3.eth.send_raw_transaction(_signed_raw_tx_bytes(signed))
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
     if int(receipt.get("status", 0)) != 1:
         raise RuntimeError(f"Agent join tx reverted for arena {arena_address}")
@@ -832,7 +842,7 @@ async def _agent_withdraw_native(
         "chainId": int(w3.eth.chain_id),
     }
     signed = acct.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    tx_hash = w3.eth.send_raw_transaction(_signed_raw_tx_bytes(signed))
     return tx_hash.hex()
 
 

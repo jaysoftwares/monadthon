@@ -20,6 +20,10 @@ const UserAgents = () => {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [error, setError] = useState(null);
   const [walletInfo, setWalletInfo] = useState({});
+  const [withdrawAgent, setWithdrawAgent] = useState(null);
+  const [withdrawToAddress, setWithdrawToAddress] = useState('');
+  const [withdrawAmountMon, setWithdrawAmountMon] = useState('0.01');
+  const [withdrawing, setWithdrawing] = useState(false);
 
   // New agent form state
   const [newAgent, setNewAgent] = useState({
@@ -197,31 +201,40 @@ const UserAgents = () => {
     }
   };
 
-  const withdrawFromAgent = async (agent) => {
-    if (!agent?.agent_id || !address) return;
+  const openWithdrawModal = (agent) => {
+    if (!agent) return;
+    setWithdrawAgent(agent);
+    setWithdrawToAddress(address || '');
+    setWithdrawAmountMon('0.01');
+  };
 
-    const toAddress = window.prompt('Withdraw to wallet address:', address);
-    if (!toAddress) return;
+  const closeWithdrawModal = () => {
+    setWithdrawAgent(null);
+    setWithdrawToAddress('');
+    setWithdrawAmountMon('0.01');
+    setWithdrawing(false);
+  };
 
-    const amountMon = window.prompt('Amount to withdraw (MON):', '0.01');
-    if (!amountMon) return;
+  const submitWithdraw = async () => {
+    if (!withdrawAgent?.agent_id || !address) return;
 
     let amountWei;
     try {
-      amountWei = parseMONToWei(amountMon);
+      amountWei = parseMONToWei(withdrawAmountMon);
     } catch (err) {
       setError(err.message || 'Invalid amount');
       return;
     }
 
     try {
+      setWithdrawing(true);
       const response = await fetch(
-        `${API_BASE}/api/agents/${agent.agent_id}/withdraw?owner_address=${address}`,
+        `${API_BASE}/api/agents/${withdrawAgent.agent_id}/withdraw?owner_address=${address}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            to_address: toAddress,
+            to_address: withdrawToAddress,
             amount_wei: amountWei,
           }),
         }
@@ -232,9 +245,11 @@ const UserAgents = () => {
         throw new Error(data.detail || 'Withdraw failed');
       }
 
-      await fetchAgentWallet(agent.agent_id);
+      await fetchAgentWallet(withdrawAgent.agent_id);
+      closeWithdrawModal();
     } catch (err) {
       setError(err.message || 'Withdraw failed');
+      setWithdrawing(false);
     }
   };
 
@@ -399,7 +414,7 @@ const UserAgents = () => {
                       : `${walletInfo[agent.agent_id]?.balance_mon || '0.000000'} MON`}
                   </p>
                   <button
-                    onClick={() => withdrawFromAgent(agent)}
+                    onClick={() => openWithdrawModal(agent)}
                     disabled={!agent.wallet_address}
                     className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded bg-purple-100 text-purple-700 hover:bg-purple-200 disabled:opacity-50"
                   >
@@ -574,6 +589,63 @@ const UserAgents = () => {
                 className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 Create Agent
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Withdraw Modal */}
+      {withdrawAgent && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4">
+            <h3 className="text-xl font-bold text-gray-900 mb-4">Withdraw Agent Funds</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Agent: <span className="font-medium text-gray-900">{withdrawAgent.name}</span>
+            </p>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Destination Wallet
+                </label>
+                <input
+                  type="text"
+                  value={withdrawToAddress}
+                  onChange={(e) => setWithdrawToAddress(e.target.value)}
+                  placeholder="0x..."
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Amount (MON)
+                </label>
+                <input
+                  type="text"
+                  value={withdrawAmountMon}
+                  onChange={(e) => setWithdrawAmountMon(e.target.value)}
+                  placeholder="0.01"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={closeWithdrawModal}
+                disabled={withdrawing}
+                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitWithdraw}
+                disabled={withdrawing || !withdrawToAddress || !withdrawAmountMon}
+                className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {withdrawing ? 'Withdrawing...' : 'Withdraw'}
               </button>
             </div>
           </div>
