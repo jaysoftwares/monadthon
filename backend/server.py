@@ -14,6 +14,7 @@ import hashlib
 import httpx
 import time
 from web3 import Web3
+from web3.exceptions import BadFunctionCallOutput
 from eth_account import Account
 from eth_abi.packed import encode_packed
 from eth_utils import keccak, to_checksum_address
@@ -100,6 +101,16 @@ NETWORK_CONFIG = {
 AGENT_SIGNER_URL = os.environ.get("AGENT_SIGNER_URL", "http://localhost:8002")
 OPENCLAW_API_URL = os.environ.get("OPENCLAW_API_URL", "")
 OPENCLAW_API_KEY = os.environ.get("OPENCLAW_API_KEY", "")
+OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", OPENCLAW_API_URL)
+OPENCLAW_BEARER_TOKEN = os.environ.get("OPENCLAW_BEARER_TOKEN", OPENCLAW_API_KEY)
+OPENCLAW_SESSION_KEY = os.environ.get("OPENCLAW_SESSION_KEY", "")
+OPENCLAW_USER_AGENT_CREATE_TOOL = os.environ.get("OPENCLAW_USER_AGENT_CREATE_TOOL", "arena.register_user_agent")
+OPENCLAW_USER_AGENT_CREATE_REQUIRED = os.environ.get("OPENCLAW_USER_AGENT_CREATE_REQUIRED", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 OPERATOR_ADDRESS = os.environ.get("OPERATOR_ADDRESS", "")
 
 # Create the main app
@@ -768,22 +779,42 @@ async def _agent_join_onchain(arena_address: str, entry_fee_wei: str, network: s
 
     w3 = Web3(Web3.HTTPProvider(config.rpc_url))
     acct = Account.from_key(agent_private_key)
-    contract = w3.eth.contract(address=Web3.to_checksum_address(arena_address), abi=ARENA_ESCROW_ABI)
+    arena_checksum = Web3.to_checksum_address(arena_address)
+    contract_code = w3.eth.get_code(arena_checksum)
+    if not contract_code or contract_code == b"" or contract_code == b"\x00":
+        raise ValueError(f"Arena contract is not deployed on {network}: {arena_address}")
+
+    contract = w3.eth.contract(address=arena_checksum, abi=ARENA_ESCROW_ABI)
     join_value = int(entry_fee_wei)
     fn = contract.functions.join()
 
     gas_price = int(w3.eth.gas_price)
+    fallback_gas = int(os.environ.get("AGENT_JOIN_FALLBACK_GAS", "120000"))
     try:
-        estimated_gas = int(fn.estimate_gas({"from": acct.address, "value": join_value}) * 1.25)
+        estimated_gas = int(fn.estimate_gas({"from": acct.address, "value": join_value}) * 1.15)
     except Exception:
-        estimated_gas = 300000
+        try:
+            estimated_gas = int(
+                w3.eth.estimate_gas(
+                    {
+                        "from": acct.address,
+                        "to": arena_checksum,
+                        "value": join_value,
+                        "data": fn._encode_transaction_data(),
+                    }
+                )
+                * 1.15
+            )
+        except Exception:
+            estimated_gas = fallback_gas
 
     balance = int(w3.eth.get_balance(acct.address))
-    total_required = join_value + (estimated_gas * gas_price)
+    gas_cost = estimated_gas * gas_price
+    total_required = join_value + gas_cost
     if balance < total_required:
         raise ValueError(
             f"Agent wallet has insufficient balance. "
-            f"Need {total_required} wei, has {balance} wei."
+            f"Need {total_required} wei (entry {join_value} + gas {gas_cost}), has {balance} wei."
         )
 
     tx = fn.build_transaction(
@@ -1171,6 +1202,83 @@ async def request_agent_signature(
                 status_code=502,
                 detail=f"Failed to connect to signing service: {str(e)}. Make sure agent_signer.py is running.",
             )
+
+
+async def register_user_agent_with_openclaw(agent: AgentConfig) -> Dict[str, Any]:
+    """
+    Register/provision a newly created user agent in hosted OpenClaw with its skill.
+    """
+    gateway_url = (OPENCLAW_GATEWAY_URL or "").rstrip("/")
+    bearer_token = OPENCLAW_BEARER_TOKEN or OPENCLAW_API_KEY
+
+    if not gateway_url or not bearer_token:
+        detail = (
+            "OpenClaw gateway is not configured. Set OPENCLAW_GATEWAY_URL and "
+            "OPENCLAW_BEARER_TOKEN (or OPENCLAW_API_KEY)."
+        )
+        if OPENCLAW_USER_AGENT_CREATE_REQUIRED:
+            raise HTTPException(status_code=500, detail=detail)
+        return {"registered": False, "session_id": None, "error": detail}
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {bearer_token}",
+    }
+    if OPENCLAW_SESSION_KEY:
+        headers["X-Session-Key"] = OPENCLAW_SESSION_KEY
+
+    payload = {
+        "tool": OPENCLAW_USER_AGENT_CREATE_TOOL,
+        "params": {
+            "agent_id": agent.agent_id,
+            "owner_address": agent.owner_address,
+            "agent_name": agent.name,
+            "provider": getattr(agent, "provider", "openclaw"),
+            "skill_id": getattr(agent, "openclaw_skill_id", "claw-arena/arena-host"),
+            "wallet_address": agent.wallet_address,
+            "strategy": agent.strategy.value,
+            "max_entry_fee_wei": agent.max_entry_fee_wei,
+            "min_entry_fee_wei": agent.min_entry_fee_wei,
+            "preferred_games": agent.preferred_games,
+            "auto_join": agent.auto_join,
+            "daily_budget_wei": agent.daily_budget_wei,
+        },
+    }
+
+    endpoint = f"{gateway_url}/api/v1/tools/invoke"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http_client:
+            response = await http_client.post(endpoint, headers=headers, json=payload)
+    except httpx.RequestError as e:
+        detail = f"Failed to connect to OpenClaw gateway: {e}"
+        if OPENCLAW_USER_AGENT_CREATE_REQUIRED:
+            raise HTTPException(status_code=502, detail=detail)
+        return {"registered": False, "session_id": None, "error": detail}
+
+    if response.status_code != 200:
+        detail = f"OpenClaw agent registration failed: {response.status_code} - {response.text}"
+        if OPENCLAW_USER_AGENT_CREATE_REQUIRED:
+            raise HTTPException(status_code=502, detail=detail)
+        return {"registered": False, "session_id": None, "error": detail}
+
+    try:
+        body = response.json()
+    except Exception:
+        detail = "OpenClaw gateway returned non-JSON response"
+        if OPENCLAW_USER_AGENT_CREATE_REQUIRED:
+            raise HTTPException(status_code=502, detail=detail)
+        return {"registered": False, "session_id": None, "error": detail}
+
+    success = bool(body.get("success"))
+    result = body.get("result") or {}
+    if not success:
+        detail = str(body.get("error") or body.get("message") or "OpenClaw registration failed")
+        if OPENCLAW_USER_AGENT_CREATE_REQUIRED:
+            raise HTTPException(status_code=502, detail=detail)
+        return {"registered": False, "session_id": None, "error": detail}
+
+    session_id = result.get("session_id") or result.get("agent_session_id") or result.get("id")
+    return {"registered": True, "session_id": session_id, "error": None}
 
 
 # ===========================================
@@ -1750,7 +1858,16 @@ async def finalize_now(address: str, _: bool = Depends(verify_admin_key)):
     if not winners or not payouts:
         raise HTTPException(status_code=400, detail="No payout data available to finalize")
 
-    finalize_tx = await _finalize_onchain(address, winners, payouts, network)
+    try:
+        finalize_tx = await _finalize_onchain(address, winners, payouts, network)
+    except BadFunctionCallOutput:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Arena contract not callable on {network} at {address}. "
+                "This usually means a legacy placeholder address, wrong network, or unsynced RPC."
+            ),
+        )
     await db.arenas.update_one(
         {"address": address},
         {
@@ -2092,6 +2209,12 @@ class AgentResponse(BaseModel):
     agent_id: str
     owner_address: str
     name: str
+    provider: str = "openclaw"
+    openclaw_skill_id: str = "claw-arena/arena-host"
+    openclaw_registered: bool = False
+    openclaw_session_id: Optional[str] = None
+    openclaw_last_sync: Optional[str] = None
+    openclaw_last_error: Optional[str] = None
     wallet_address: Optional[str] = None
     strategy: str
     max_entry_fee_wei: str
@@ -2132,6 +2255,12 @@ def agent_to_response(agent: AgentConfig) -> AgentResponse:
         agent_id=agent.agent_id,
         owner_address=agent.owner_address,
         name=agent.name,
+        provider=getattr(agent, "provider", "openclaw"),
+        openclaw_skill_id=getattr(agent, "openclaw_skill_id", "claw-arena/arena-host"),
+        openclaw_registered=bool(getattr(agent, "openclaw_registered", False)),
+        openclaw_session_id=getattr(agent, "openclaw_session_id", None),
+        openclaw_last_sync=getattr(agent, "openclaw_last_sync", None),
+        openclaw_last_error=getattr(agent, "openclaw_last_error", None),
         wallet_address=agent.wallet_address,
         strategy=agent.strategy.value,
         max_entry_fee_wei=agent.max_entry_fee_wei,
@@ -2176,7 +2305,31 @@ async def create_user_agent(request: CreateAgentRequest, owner_address: str = Qu
         logger.exception("Failed to create user agent")
         raise HTTPException(status_code=500, detail=f"Failed to create agent: {e}")
 
-    return agent_to_response(agent)
+    # Register this new user agent with hosted OpenClaw runtime.
+    try:
+        registration = await register_user_agent_with_openclaw(agent)
+    except HTTPException:
+        # Keep local DB and OpenClaw in sync: rollback local create if registration is required and fails.
+        try:
+            await user_agent_manager.delete_agent(agent.agent_id, owner_address)
+        except Exception:
+            logger.exception(f"Failed to rollback local agent {agent.agent_id} after OpenClaw registration error")
+        raise
+
+    await db.user_agents.update_one(
+        {"agent_id": agent.agent_id},
+        {
+            "$set": {
+                "openclaw_registered": bool(registration.get("registered")),
+                "openclaw_session_id": registration.get("session_id"),
+                "openclaw_last_sync": datetime.now(timezone.utc).isoformat(),
+                "openclaw_last_error": registration.get("error"),
+            }
+        },
+    )
+
+    updated_agent = await user_agent_manager.get_agent(agent.agent_id)
+    return agent_to_response(updated_agent or agent)
 
 
 @api_router.get("/agents", response_model=List[AgentResponse])
@@ -2508,6 +2661,8 @@ async def startup_event():
     logger.info("CLAW ARENA API Starting")
     logger.info(f"Default Network: {DEFAULT_NETWORK}")
     logger.info(f"OpenClaw Configured: {bool(OPENCLAW_API_URL and OPENCLAW_API_KEY)}")
+    logger.info(f"OpenClaw Gateway Configured: {bool(OPENCLAW_GATEWAY_URL and (OPENCLAW_BEARER_TOKEN or OPENCLAW_API_KEY))}")
+    logger.info(f"OpenClaw User-Agent Registration Required: {OPENCLAW_USER_AGENT_CREATE_REQUIRED}")
     logger.info(f"Operator Address: {OPERATOR_ADDRESS or 'NOT SET'}")
 
     for network, config in NETWORK_CONFIG.items():

@@ -20,6 +20,7 @@ import random
 import hashlib
 import time
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass, field, asdict
@@ -63,6 +64,12 @@ class AgentConfig:
     max_entry_fee_wei: str              # Maximum entry fee willing to pay
     min_entry_fee_wei: str              # Minimum entry fee (skip tiny games)
     preferred_games: List[str]          # Game types to join (empty = all)
+    provider: str = "openclaw"          # Agent runtime provider
+    openclaw_skill_id: str = "claw-arena/arena-host"
+    openclaw_registered: bool = False
+    openclaw_session_id: Optional[str] = None
+    openclaw_last_sync: Optional[str] = None
+    openclaw_last_error: Optional[str] = None
     wallet_address: Optional[str] = None      # Dedicated wallet used by this agent
     wallet_private_key: Optional[str] = None  # Server-managed key for autonomous txs
     auto_join: bool = True              # Automatically join matching tournaments
@@ -145,6 +152,45 @@ class UserAgentManager:
         except Exception:
             return AgentMode.AUTO_PLAY
 
+    def _hydrate_agent_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize legacy/incomplete DB records so they remain usable.
+        """
+        hydrated = dict(data)
+        agent_id = str(hydrated.get("agent_id") or "")
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        hydrated["agent_id"] = agent_id
+        hydrated["owner_address"] = str(hydrated.get("owner_address") or "").lower()
+        hydrated["name"] = str(hydrated.get("name") or f"Agent {agent_id[:6]}")
+        hydrated["provider"] = str(hydrated.get("provider") or "openclaw").lower()
+        hydrated["openclaw_skill_id"] = str(hydrated.get("openclaw_skill_id") or "claw-arena/arena-host")
+        hydrated["openclaw_registered"] = bool(hydrated.get("openclaw_registered", False))
+        hydrated["openclaw_session_id"] = hydrated.get("openclaw_session_id")
+        hydrated["openclaw_last_sync"] = hydrated.get("openclaw_last_sync")
+        hydrated["openclaw_last_error"] = hydrated.get("openclaw_last_error")
+        hydrated["max_entry_fee_wei"] = str(hydrated.get("max_entry_fee_wei") or "100000000000000000")
+        hydrated["min_entry_fee_wei"] = str(hydrated.get("min_entry_fee_wei") or "1000000000000000")
+        hydrated["preferred_games"] = hydrated.get("preferred_games") or []
+        hydrated["auto_join"] = bool(hydrated.get("auto_join", True))
+        hydrated["max_concurrent_games"] = int(hydrated.get("max_concurrent_games", 1) or 1)
+        hydrated["daily_budget_wei"] = str(hydrated.get("daily_budget_wei") or "0")
+        hydrated["has_authorization"] = bool(hydrated.get("has_authorization", False))
+        hydrated["authorization_expires_at"] = hydrated.get("authorization_expires_at")
+        hydrated["total_games"] = int(hydrated.get("total_games", 0) or 0)
+        hydrated["total_wins"] = int(hydrated.get("total_wins", 0) or 0)
+        hydrated["total_earnings_wei"] = str(hydrated.get("total_earnings_wei") or "0")
+        hydrated["total_spent_wei"] = str(hydrated.get("total_spent_wei") or "0")
+        hydrated["current_game_id"] = hydrated.get("current_game_id")
+        hydrated["current_arena_address"] = hydrated.get("current_arena_address")
+        hydrated["created_at"] = str(hydrated.get("created_at") or now_iso)
+        hydrated["last_active_at"] = hydrated.get("last_active_at")
+
+        hydrated["strategy"] = self._safe_strategy(hydrated.get("strategy"))
+        hydrated["status"] = self._safe_status(hydrated.get("status"))
+        hydrated["mode"] = self._safe_mode(hydrated.get("mode"))
+        return hydrated
+
     async def start(self):
         """Start the agent manager"""
         self.http_client = httpx.AsyncClient(timeout=30.0)
@@ -197,6 +243,8 @@ class UserAgentManager:
             agent_id=agent_id,
             owner_address=owner_address.lower(),
             name=name,
+            provider="openclaw",
+            openclaw_skill_id=os.environ.get("OPENCLAW_SKILL_ID", "claw-arena/arena-host"),
             wallet_address=wallet_account.address,
             wallet_private_key=wallet_account.key.hex(),
             strategy=strategy,
@@ -258,10 +306,7 @@ class UserAgentManager:
         if data:
             data.pop('_id', None)
             data = await self._ensure_agent_wallet(data)
-            # Convert string enums back
-            data['strategy'] = self._safe_strategy(data.get('strategy'))
-            data['status'] = self._safe_status(data.get('status'))
-            data['mode'] = self._safe_mode(data.get('mode'))
+            data = self._hydrate_agent_data(data)
             return AgentConfig(**data)
         return None
 
@@ -271,14 +316,15 @@ class UserAgentManager:
             return []
 
         agents = []
-        cursor = self.db.user_agents.find({"owner_address": owner_address.lower()})
+        escaped = re.escape(owner_address or "")
+        cursor = self.db.user_agents.find(
+            {"owner_address": {"$regex": f"^{escaped}$", "$options": "i"}}
+        )
         async for data in cursor:
             try:
                 data.pop('_id', None)
                 data = await self._ensure_agent_wallet(data)
-                data['strategy'] = self._safe_strategy(data.get('strategy'))
-                data['status'] = self._safe_status(data.get('status'))
-                data['mode'] = self._safe_mode(data.get('mode'))
+                data = self._hydrate_agent_data(data)
                 agents.append(AgentConfig(**data))
             except Exception as e:
                 logger.error(f"Skipping invalid agent record in owner list: {e}")
@@ -297,9 +343,7 @@ class UserAgentManager:
             try:
                 data.pop('_id', None)
                 data = await self._ensure_agent_wallet(data)
-                data['strategy'] = self._safe_strategy(data.get('strategy'))
-                data['status'] = self._safe_status(data.get('status'))
-                data['mode'] = self._safe_mode(data.get('mode'))
+                data = self._hydrate_agent_data(data)
                 # Restart only actionable agents.
                 if data['status'] in (AgentStatus.ACTIVE, AgentStatus.IN_GAME):
                     agents.append(AgentConfig(**data))
@@ -313,7 +357,19 @@ class UserAgentManager:
             return False
 
         # Don't allow updating certain fields
-        protected_fields = ['agent_id', 'owner_address', 'created_at', 'wallet_address', 'wallet_private_key']
+        protected_fields = [
+            'agent_id',
+            'owner_address',
+            'created_at',
+            'wallet_address',
+            'wallet_private_key',
+            'provider',
+            'openclaw_skill_id',
+            'openclaw_registered',
+            'openclaw_session_id',
+            'openclaw_last_sync',
+            'openclaw_last_error',
+        ]
         for field in protected_fields:
             updates.pop(field, None)
 
@@ -395,13 +451,15 @@ class UserAgentManager:
                 tournaments = await self._find_matching_tournaments(agent)
 
                 if agent.auto_join and tournaments and agent.current_game_id is None:
-                    # Join the best matching tournament
-                    tournament = tournaments[0]
-                    success = await self._join_tournament(agent, tournament)
+                    joined_tournament = None
+                    for tournament in tournaments:
+                        success = await self._join_tournament(agent, tournament)
+                        if success:
+                            joined_tournament = tournament
+                            break
 
-                    if success:
-                        # Play the game
-                        await self._play_game(agent, tournament)
+                    if joined_tournament:
+                        await self._play_game(agent, joined_tournament)
 
                 # Wait before next check
                 await asyncio.sleep(30)  # Check every 30 seconds
