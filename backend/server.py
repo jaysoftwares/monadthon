@@ -2606,6 +2606,9 @@ async def index_arena_created(payload: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="address is required")
 
     normalized_payload = dict(payload)
+    # Avoid Mongo update conflict when address is both in $set and $setOnInsert.
+    normalized_payload.pop("address", None)
+    normalized_payload.pop("_id", None)
     if "max_players" in normalized_payload:
         normalized_payload["max_players"] = _normalize_max_players(normalized_payload.get("max_players"))
 
