@@ -244,6 +244,12 @@ export const getAgentSchedule = async () => {
   return response.data;
 };
 
+export const getUserAgents = async (ownerAddress) => {
+  if (!ownerAddress) return [];
+  const response = await apiClient.get('/agents', { params: { owner_address: ownerAddress } });
+  return response.data;
+};
+
 // Helper functions
 export const formatMON = (weiString) => {
   if (!weiString) return '0';

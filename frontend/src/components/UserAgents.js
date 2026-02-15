@@ -380,6 +380,18 @@ const UserAgents = () => {
                 )}
               </div>
 
+              {agent.current_game_id && (
+                <div className="mb-4 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2">
+                  <p className="text-[11px] font-medium text-blue-700 mb-1">Current Tournament</p>
+                  <a
+                    href={`/arena/${agent.current_game_id}`}
+                    className="text-xs font-mono text-blue-800 underline break-all"
+                  >
+                    {agent.current_game_id}
+                  </a>
+                </div>
+              )}
+
               {/* Agent wallet */}
               <div className="bg-gray-50 border border-gray-100 rounded-lg p-3 mb-4">
                 <div className="flex items-center justify-between mb-2">

@@ -29,6 +29,13 @@ ARENA_ESCROW_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    {
+        "inputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "name": "isPlayer",
+        "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
     {"inputs": [], "name": "closeRegistration", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
     {"inputs": [], "name": "cancelAndRefund", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
     {"inputs": [], "name": "join", "outputs": [], "stateMutability": "payable", "type": "function"},
@@ -105,7 +112,7 @@ OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", OPENCLAW_API_URL)
 OPENCLAW_BEARER_TOKEN = os.environ.get("OPENCLAW_BEARER_TOKEN", OPENCLAW_API_KEY)
 OPENCLAW_SESSION_KEY = os.environ.get("OPENCLAW_SESSION_KEY", "")
 OPENCLAW_USER_AGENT_CREATE_TOOL = os.environ.get("OPENCLAW_USER_AGENT_CREATE_TOOL", "arena.register_user_agent")
-OPENCLAW_USER_AGENT_CREATE_REQUIRED = os.environ.get("OPENCLAW_USER_AGENT_CREATE_REQUIRED", "true").strip().lower() in (
+OPENCLAW_USER_AGENT_CREATE_REQUIRED = os.environ.get("OPENCLAW_USER_AGENT_CREATE_REQUIRED", "false").strip().lower() in (
     "1",
     "true",
     "yes",
@@ -769,6 +776,76 @@ def _get_wallet_balance_wei(address: str, network: str) -> int:
 
     w3 = Web3(Web3.HTTPProvider(config.rpc_url))
     return int(w3.eth.get_balance(Web3.to_checksum_address(address)))
+
+
+async def _is_player_onchain(arena_address: str, player_address: str, network: str) -> bool:
+    """
+    Check on-chain membership in arena.players to reconcile DB state after successful join tx.
+    """
+    try:
+        config = get_network_config(network)
+        w3 = Web3(Web3.HTTPProvider(config.rpc_url))
+        arena_checksum = Web3.to_checksum_address(arena_address)
+        player_checksum = Web3.to_checksum_address(player_address)
+        code = w3.eth.get_code(arena_checksum)
+        if not code or code in (b"", b"\x00"):
+            return False
+
+        contract = w3.eth.contract(address=arena_checksum, abi=ARENA_ESCROW_ABI)
+        return bool(contract.functions.isPlayer(player_checksum).call())
+    except Exception:
+        return False
+
+
+def _address_eq(left: Optional[str], right: Optional[str]) -> bool:
+    if not left or not right:
+        return False
+    return left.lower() == right.lower()
+
+
+def _arena_has_player(arena: Optional[Dict[str, Any]], player_address: str) -> bool:
+    if not arena:
+        return False
+    return any(_address_eq(p, player_address) for p in (arena.get("players") or []))
+
+
+async def _record_join_offchain(arena_address: str, player_address: str, tx_hash: str) -> bool:
+    """
+    Record a join in Mongo if missing. Returns True only when player was newly added to arena.players.
+    """
+    existing_join = await db.joins.find_one({"arena_address": arena_address, "player_address": player_address})
+    if not existing_join:
+        join_record = PlayerJoin(arena_address=arena_address, player_address=player_address, tx_hash=tx_hash)
+        await db.joins.insert_one(join_record.model_dump())
+    elif tx_hash and existing_join.get("tx_hash") != tx_hash:
+        await db.joins.update_one(
+            {"arena_address": arena_address, "player_address": player_address},
+            {"$set": {"tx_hash": tx_hash}},
+        )
+
+    arena_doc = await db.arenas.find_one({"address": arena_address}, {"players": 1})
+    already_in_players = any(_address_eq(p, player_address) for p in (arena_doc or {}).get("players", []))
+    if already_in_players:
+        added_player = False
+    else:
+        push_result = await db.arenas.update_one({"address": arena_address}, {"$push": {"players": player_address}})
+        added_player = push_result.modified_count > 0
+    if added_player:
+        await db.leaderboard.update_one(
+            {"address": player_address},
+            {
+                "$setOnInsert": {
+                    "address": player_address,
+                    "total_wins": 0,
+                    "total_payouts": "0",
+                    "tournaments_won": 0,
+                },
+                "$inc": {"tournaments_played": 1},
+            },
+            upsert=True,
+        )
+
+    return added_player
 
 
 async def _agent_join_onchain(arena_address: str, entry_fee_wei: str, network: str, agent_private_key: str) -> str:
@@ -1495,15 +1572,68 @@ async def agent_tournament_created(_: bool = Depends(verify_admin_key)):
 # ===========================================
 
 
+async def _apply_post_join_updates(arena_address: str) -> Dict[str, Any]:
+    """
+    Apply registration/game countdown transitions after a successful join sync.
+    """
+    updated_arena = await db.arenas.find_one({"address": arena_address})
+    if not updated_arena:
+        return {}
+
+    players = updated_arena.get("players", [])
+    max_players = _normalize_max_players(updated_arena.get("max_players", 8))
+    if updated_arena.get("max_players") != max_players:
+        await db.arenas.update_one({"address": arena_address}, {"$set": {"max_players": max_players}})
+
+    response: Dict[str, Any] = {}
+    player_count = len(players)
+    if player_count >= max_players and not updated_arena.get("is_closed"):
+        await timer_manager.cancel_timer(arena_address, "registration_countdown")
+        await timer_manager.cancel_timer(arena_address, "idle_timer")
+
+        await db.arenas.update_one(
+            {"address": arena_address},
+            {"$set": {"is_closed": True, "closed_at": datetime.now(timezone.utc).isoformat()}},
+        )
+
+        try:
+            network = updated_arena.get("network", os.environ.get("DEFAULT_NETWORK", "testnet"))
+            close_tx = await _close_registration_onchain(arena_address, network)
+            await db.arenas.update_one({"address": arena_address}, {"$set": {"close_tx_hash": close_tx}})
+        except Exception as e:
+            logger.error(f"Failed to close registration on-chain for {arena_address}: {e}")
+
+        await timer_manager.start_game_countdown(arena_address, countdown_seconds=10)
+
+        response["arena_full"] = True
+        response["countdown_starts"] = True
+        response["countdown_seconds"] = 10
+        logger.info(f"Arena {arena_address} is now full, starting game countdown")
+
+    elif player_count == 1 and not updated_arena.get("is_closed"):
+        # Core flow: once first player joins, start 60s registration countdown.
+        await timer_manager.start_registration_timer(arena_address, countdown_seconds=60)
+        response["registration_timer_started"] = True
+        response["registration_seconds"] = 60
+        logger.info(f"Arena {arena_address} first join -> registration countdown started (60s)")
+
+    elif player_count >= 2 and not updated_arena.get("is_closed"):
+        # Keep registration window open for countdown duration.
+        if not updated_arena.get("registration_deadline"):
+            await timer_manager.start_registration_timer(arena_address, countdown_seconds=60)
+        response["registration_open"] = True
+        response["player_count"] = player_count
+        logger.info(f"Arena {arena_address} has {player_count} players; waiting for registration countdown")
+
+    return response
+
+
 @api_router.post("/arenas/join")
 async def join_arena(join_data: JoinArena):
     """Record a player joining an arena (called after on-chain join tx)"""
     arena = await db.arenas.find_one({"address": join_data.arena_address})
     if not arena:
         raise HTTPException(status_code=404, detail="Arena not found")
-
-    if arena.get("is_closed"):
-        raise HTTPException(status_code=400, detail="Arena registration is closed")
 
     if arena.get("is_finalized"):
         raise HTTPException(status_code=400, detail="Arena is already finalized")
@@ -1512,70 +1642,29 @@ async def join_arena(join_data: JoinArena):
     if arena.get("max_players") != max_players_initial:
         await db.arenas.update_one({"address": join_data.arena_address}, {"$set": {"max_players": max_players_initial}})
 
-    if len(arena.get("players", [])) >= max_players_initial:
+    players_initial = arena.get("players", [])
+    already_joined = _arena_has_player(arena, join_data.player_address)
+
+    if arena.get("is_closed") and not already_joined:
+        raise HTTPException(status_code=400, detail="Arena registration is closed")
+
+    if not already_joined and len(players_initial) >= max_players_initial:
         raise HTTPException(status_code=400, detail="Arena is full")
 
-    if join_data.player_address in arena.get("players", []):
-        raise HTTPException(status_code=400, detail="Player already joined")
-
-    join_record = PlayerJoin(arena_address=join_data.arena_address, player_address=join_data.player_address, tx_hash=join_data.tx_hash)
-    await db.joins.insert_one(join_record.model_dump())
-
-    await db.arenas.update_one({"address": join_data.arena_address}, {"$push": {"players": join_data.player_address}})
-
-    await db.leaderboard.update_one(
-        {"address": join_data.player_address},
-        {"$setOnInsert": {"address": join_data.player_address, "total_wins": 0, "total_payouts": "0", "tournaments_won": 0}, "$inc": {"tournaments_played": 1}},
-        upsert=True,
+    added_player = await _record_join_offchain(
+        arena_address=join_data.arena_address,
+        player_address=join_data.player_address,
+        tx_hash=join_data.tx_hash,
     )
+    logger.info(f"Player {join_data.player_address} join sync for arena {join_data.arena_address} (added={added_player})")
 
-    logger.info(f"Player {join_data.player_address} joined arena {join_data.arena_address}")
-
-    updated_arena = await db.arenas.find_one({"address": join_data.arena_address})
-    players = updated_arena.get("players", [])
-    max_players = _normalize_max_players(updated_arena.get("max_players", 8))
-    if updated_arena.get("max_players") != max_players:
-        await db.arenas.update_one({"address": join_data.arena_address}, {"$set": {"max_players": max_players}})
-
-    response = {"success": True, "message": "Player joined arena", "tx_hash": join_data.tx_hash}
-
-    if len(players) >= max_players and not updated_arena.get("is_closed"):
-        await timer_manager.cancel_timer(join_data.arena_address, "registration_countdown")
-        await timer_manager.cancel_timer(join_data.arena_address, "idle_timer")
-
-        await db.arenas.update_one(
-            {"address": join_data.arena_address},
-            {"$set": {"is_closed": True, "closed_at": datetime.now(timezone.utc).isoformat()}},
-        )
-
-        try:
-            network = updated_arena.get("network", os.environ.get("DEFAULT_NETWORK", "testnet"))
-            close_tx = await _close_registration_onchain(join_data.arena_address, network)
-            await db.arenas.update_one({"address": join_data.arena_address}, {"$set": {"close_tx_hash": close_tx}})
-        except Exception as e:
-            logger.error(f"Failed to close registration on-chain for {join_data.arena_address}: {e}")
-
-        await timer_manager.start_game_countdown(join_data.arena_address, countdown_seconds=10)
-
-        response["arena_full"] = True
-        response["countdown_starts"] = True
-        response["countdown_seconds"] = 10
-        logger.info(f"Arena {join_data.arena_address} is now full, starting game countdown")
-
-    elif len(players) == 1 and not updated_arena.get("is_closed"):
-        # Core flow: once first player joins, start 60s registration countdown.
-        await timer_manager.start_registration_timer(join_data.arena_address, countdown_seconds=60)
-        response["registration_timer_started"] = True
-        response["registration_seconds"] = 60
-        logger.info(f"Arena {join_data.arena_address} first join -> registration countdown started (60s)")
-
-    elif len(players) >= 2 and not updated_arena.get("is_closed"):
-        # Keep registration window open for countdown duration.
-        if not updated_arena.get("registration_deadline"):
-            await timer_manager.start_registration_timer(join_data.arena_address, countdown_seconds=60)
-        response["registration_open"] = True
-        response["player_count"] = len(players)
-        logger.info(f"Arena {join_data.arena_address} has {len(players)} players; waiting for registration countdown")
+    response = {
+        "success": True,
+        "message": "Player joined arena" if added_player else "Player already joined arena (synced)",
+        "tx_hash": join_data.tx_hash,
+        "already_joined": not added_player,
+    }
+    response.update(await _apply_post_join_updates(join_data.arena_address))
 
     return response
 
@@ -2306,15 +2395,17 @@ async def create_user_agent(request: CreateAgentRequest, owner_address: str = Qu
         raise HTTPException(status_code=500, detail=f"Failed to create agent: {e}")
 
     # Register this new user agent with hosted OpenClaw runtime.
+    # Do not block local agent creation if gateway registration fails.
+    registration: Dict[str, Any]
     try:
         registration = await register_user_agent_with_openclaw(agent)
-    except HTTPException:
-        # Keep local DB and OpenClaw in sync: rollback local create if registration is required and fails.
-        try:
-            await user_agent_manager.delete_agent(agent.agent_id, owner_address)
-        except Exception:
-            logger.exception(f"Failed to rollback local agent {agent.agent_id} after OpenClaw registration error")
-        raise
+    except HTTPException as e:
+        registration = {
+            "registered": False,
+            "session_id": None,
+            "error": str(e.detail),
+        }
+        logger.warning(f"OpenClaw registration failed for {agent.agent_id}, continuing local create: {e.detail}")
 
     await db.user_agents.update_one(
         {"agent_id": agent.agent_id},
@@ -2557,7 +2648,7 @@ async def join_arena_with_agent(address: str, agent_id: str = Query(...), owner_
 
     agent_player_address = agent.wallet_address
 
-    if agent_player_address in players:
+    if _arena_has_player(arena, agent_player_address):
         raise HTTPException(status_code=400, detail="Agent already in arena")
 
     network = arena.get("network", DEFAULT_NETWORK)
@@ -2575,13 +2666,31 @@ async def join_arena_with_agent(address: str, agent_id: str = Query(...), owner_
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent failed to join on-chain: {e}")
 
-    join_result = await join_arena(
-        JoinArena(
-            arena_address=address,
-            player_address=agent_player_address,
-            tx_hash=join_tx_hash,
+    try:
+        join_result = await join_arena(
+            JoinArena(
+                arena_address=address,
+                player_address=agent_player_address,
+                tx_hash=join_tx_hash,
+            )
         )
-    )
+    except HTTPException as join_sync_error:
+        # On-chain tx already succeeded. If player exists on-chain, reconcile DB so UI is consistent.
+        onchain_member = await _is_player_onchain(address, agent_player_address, network)
+        if not onchain_member:
+            raise join_sync_error
+
+        await _record_join_offchain(address, agent_player_address, join_tx_hash)
+        join_result = {
+            "success": True,
+            "message": "Agent joined arena (reconciled from on-chain state)",
+            "tx_hash": join_tx_hash,
+            "offchain_reconciled": True,
+        }
+        join_result.update(await _apply_post_join_updates(address))
+        logger.warning(
+            f"Reconciled agent join for {address} after off-chain sync error: {join_sync_error.detail}"
+        )
 
     logger.info(f"Agent {agent_id} joined arena {address} with wallet {agent_player_address}")
 

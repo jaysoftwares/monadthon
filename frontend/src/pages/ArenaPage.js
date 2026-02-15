@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { getArena, joinArena, formatMON, getExplorerUrl, getGameState, getGameRules } from '../services/api';
+import { getArena, joinArena, formatMON, getExplorerUrl, getGameState, getGameRules, getUserAgents } from '../services/api';
 import { useWallet } from '../context/WalletContext';
 import { useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
 import { parseEther } from 'viem';
@@ -28,12 +28,13 @@ const ArenaPage = () => {
   const [loading, setLoading] = useState(true);
   const [joining, setJoining] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [gameState, setGameState] = useState(null);
+  const [, setGameState] = useState(null);
   const [gameRules, setGameRules] = useState(null);
   const [showHowToPlay, setShowHowToPlay] = useState(false);
   const [gameCountdown, setGameCountdown] = useState(null);
   const [idleCountdown, setIdleCountdown] = useState(null);
   const [learningModalShownForGame, setLearningModalShownForGame] = useState(null);
+  const [ownedAgentWallets, setOwnedAgentWallets] = useState([]);
 
   // ✅ MISSING STATE (you call setPendingTx but never defined it)
   const [pendingTx, setPendingTx] = useState(null);
@@ -68,18 +69,33 @@ const ArenaPage = () => {
     };
   }, [writeHook]);
 
-  // (optional) keep import; not changing UI
-  // If you later want to use it, you can:
-  // const receipt = useWaitForTransactionReceipt({ hash: pendingTx, query: { enabled: !!pendingTx } });
+  useWaitForTransactionReceipt({ hash: pendingTx, query: { enabled: !!pendingTx } });
 
   // Track whether the arena was deleted (e.g. by idle timer refund)
   const [arenaDeleted, setArenaDeleted] = useState(false);
-  const hasJoined = !!arena?.players?.includes(walletAddress);
+  const normalizedWalletAddress = walletAddress?.toLowerCase() || null;
+  const normalizedArenaPlayers = useMemo(
+    () => (arena?.players || []).map((player) => (player || '').toLowerCase()).filter(Boolean),
+    [arena?.players],
+  );
+  const normalizedOwnedAgentWallets = useMemo(
+    () => ownedAgentWallets.map((agentWallet) => (agentWallet || '').toLowerCase()).filter(Boolean),
+    [ownedAgentWallets],
+  );
+  const walletHasJoined = !!(normalizedWalletAddress && normalizedArenaPlayers.includes(normalizedWalletAddress));
+  const joinedAgentAddress = useMemo(() => {
+    if (!arena?.players?.length || normalizedOwnedAgentWallets.length === 0) return null;
+    const ownedAgentSet = new Set(normalizedOwnedAgentWallets);
+    return arena.players.find((player) => ownedAgentSet.has((player || '').toLowerCase())) || null;
+  }, [arena?.players, normalizedOwnedAgentWallets]);
+  const agentHasJoined = !!joinedAgentAddress;
+  const hasJoined = walletHasJoined || agentHasJoined;
+  const activePlayerAddress = walletHasJoined ? walletAddress : joinedAgentAddress;
   const canJoin = !!(arena &&
     !arena.is_closed &&
     !arena.is_finalized &&
     arena.players?.length < arena.max_players &&
-    !arena.players?.includes(walletAddress));
+    !hasJoined);
 
   // ✅ Keep latest arena in a ref (fixes ESLint exhaustive-deps without changing behavior)
   const arenaRef = useRef(null);
@@ -87,6 +103,35 @@ const ArenaPage = () => {
   useEffect(() => {
     arenaRef.current = arena;
   }, [arena]);
+
+  useEffect(() => {
+    let stopped = false;
+
+    const fetchOwnedAgents = async () => {
+      if (!walletAddress) {
+        setOwnedAgentWallets([]);
+        return;
+      }
+      try {
+        const agents = await getUserAgents(walletAddress);
+        if (stopped) return;
+        const wallets = Array.isArray(agents)
+          ? agents.map((agent) => agent?.wallet_address).filter(Boolean)
+          : [];
+        setOwnedAgentWallets(wallets);
+      } catch (error) {
+        if (!stopped) {
+          console.error('Failed to fetch owned agents:', error);
+          setOwnedAgentWallets([]);
+        }
+      }
+    };
+
+    fetchOwnedAgents();
+    return () => {
+      stopped = true;
+    };
+  }, [walletAddress]);
 
   useEffect(() => {
     const winners = Array.isArray(arena?.winners) && arena.winners.length > 0
@@ -253,7 +298,7 @@ useEffect(() => {
   setJoining(true);
   const toastId = toast.loading('Preparing transaction...');
 
-  try {
+ try {
     // 1. Determine the value. 
     // If your API returns Wei (e.g., "100000000000000000"), use BigInt.
     // If your API returns Ether (e.g., "0.1"), use parseEther.
@@ -261,14 +306,34 @@ useEffect(() => {
       ? parseEther(arena.entry_fee.toString()) 
       : BigInt(arena.entry_fee);
 
-    // 2. Trigger the contract write
-    // This is where it was likely failing during "Gas Estimation"
-    const hash = await writeContractAsync({
+    const txRequest = {
       address: arena.address, // Ensure this is the Escrow address, not the Factory
       abi: ARENA_ESCROW_ABI,
       functionName: 'join',
       value: entryFeeWei,
-    });
+    };
+
+    // 2. Trigger the contract write.
+    // Monad RPC sometimes returns "gas limit too low" from wallet-estimation path;
+    // retry once with an explicit safe gas limit.
+    let hash;
+    try {
+      hash = await writeContractAsync(txRequest);
+    } catch (firstErr) {
+      const firstMessage = (firstErr?.cause?.message || firstErr?.shortMessage || firstErr?.message || '').toLowerCase();
+      const isGasLimitIssue =
+        firstMessage.includes('gas limit too low') ||
+        firstMessage.includes('intrinsic gas too low') ||
+        firstMessage.includes('out of gas');
+      if (!isGasLimitIssue) {
+        throw firstErr;
+      }
+
+      hash = await writeContractAsync({
+        ...txRequest,
+        gas: 300000n,
+      });
+    }
 
     setPendingTx(hash);
     toast.success('Transaction submitted!', { id: toastId });
@@ -378,14 +443,15 @@ useEffect(() => {
     : (Array.isArray(arena?.game_results?.winners) ? arena.game_results.winners : []);
   const resolvedPayouts = Array.isArray(arena?.payouts) ? arena.payouts : [];
   const resultsAvailable = resolvedWinners.length > 0 && (arena?.game_status === 'finished' || arena?.is_finalized);
-  const isWalletWinner = !!(walletAddress && resolvedWinners.includes(walletAddress));
-  const walletWinnerIndex = isWalletWinner ? resolvedWinners.indexOf(walletAddress) : -1;
-  const walletWinnerPayout = walletWinnerIndex >= 0 ? resolvedPayouts[walletWinnerIndex] : null;
+  const normalizedWinners = resolvedWinners.map((winner) => (winner || '').toLowerCase());
+  const walletWinnerIndex = normalizedWalletAddress ? normalizedWinners.indexOf(normalizedWalletAddress) : -1;
+  const agentWinnerIndex = joinedAgentAddress ? normalizedWinners.indexOf(joinedAgentAddress.toLowerCase()) : -1;
+  const participantWinnerIndex = walletWinnerIndex >= 0 ? walletWinnerIndex : agentWinnerIndex;
+  const isParticipantWinner = participantWinnerIndex >= 0;
+  const participantWinnerPayout = participantWinnerIndex >= 0 ? resolvedPayouts[participantWinnerIndex] : null;
   const topWinner = resolvedWinners[0] || null;
   const topWinnerPayout = resolvedPayouts[0] || null;
   const prizePool = BigInt(arena.entry_fee || '0') * BigInt(playerCount);
-  const protocolFee = (prizePool * BigInt(arena.protocol_fee_bps || 250)) / BigInt(10000);
-  const netPrizePool = prizePool - protocolFee;
 
   return (
     <div className="min-h-screen bg-gray-50" data-testid="arena-page">
@@ -520,9 +586,9 @@ useEffect(() => {
               <PartyPopper className="w-6 h-6 text-yellow-600" />
               <h3 className="font-heading text-2xl font-bold text-yellow-700">Winner!</h3>
             </div>
-            {isWalletWinner ? (
+            {isParticipantWinner ? (
               <p className="text-yellow-800 font-medium">
-                Congratulations, you won {walletWinnerPayout ? `${formatMON(walletWinnerPayout)} MON` : 'this tournament'}.
+                Congratulations, you won {participantWinnerPayout ? `${formatMON(participantWinnerPayout)} MON` : 'this tournament'}.
               </p>
             ) : (
               <p className="text-yellow-800 font-medium">
@@ -535,9 +601,14 @@ useEffect(() => {
         {/* Interactive Game UI */}
         {hasJoined && ['learning', 'active', 'finished'].includes(arena?.game_status) && (
           <div className="mb-8">
+            {agentHasJoined && !walletHasJoined && (
+              <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+                Your agent wallet {joinedAgentAddress} is in this tournament.
+              </div>
+            )}
             <GameContainer
               arenaAddress={address}
-              playerAddress={walletAddress}
+              playerAddress={activePlayerAddress || walletAddress}
               onGameEnd={() => {}}
             />
           </div>
@@ -676,7 +747,11 @@ useEffect(() => {
         {hasJoined && !arena.is_finalized && (
           <div className="bg-green-50 border border-green-200 rounded-xl p-4 mb-8 flex items-center gap-3">
             <CheckCircle className="w-5 h-5 text-green-500" />
-            <span className="text-green-700 font-medium">You have joined this tournament!</span>
+            <span className="text-green-700 font-medium">
+              {walletHasJoined
+                ? 'You have joined this tournament!'
+                : `Your agent wallet ${joinedAgentAddress} has joined this tournament!`}
+            </span>
           </div>
         )}
 
@@ -696,8 +771,11 @@ useEffect(() => {
                     </div>
                     <div>
                       <p className="font-mono text-sm text-gray-900">{player}</p>
-                      {player === walletAddress && (
+                      {normalizedWalletAddress && player.toLowerCase() === normalizedWalletAddress && (
                         <span className="text-xs text-[#836EF9] font-medium">You</span>
+                      )}
+                      {normalizedOwnedAgentWallets.includes(player.toLowerCase()) && (
+                        <span className="ml-2 text-xs text-blue-600 font-medium">Your Agent</span>
                       )}
                     </div>
                   </div>
@@ -739,8 +817,11 @@ useEffect(() => {
                     </div>
                     <div>
                       <p className="font-mono text-sm text-gray-900">{winner}</p>
-                      {winner === walletAddress && (
+                      {normalizedWalletAddress && winner.toLowerCase() === normalizedWalletAddress && (
                         <span className="text-xs text-[#836EF9] font-medium">You</span>
+                      )}
+                      {normalizedOwnedAgentWallets.includes(winner.toLowerCase()) && (
+                        <span className="ml-2 text-xs text-blue-600 font-medium">Your Agent</span>
                       )}
                     </div>
                   </div>
