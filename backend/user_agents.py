@@ -256,12 +256,14 @@ class UserAgentManager:
         return agents
 
     async def get_all_active_agents(self) -> List[AgentConfig]:
-        """Get all active agents"""
+        """Get all agents that should resume on startup."""
         if self.db is None:
             return []
 
         agents = []
-        cursor = self.db.user_agents.find({"status": AgentStatus.ACTIVE.value})
+        cursor = self.db.user_agents.find(
+            {"status": {"$in": [AgentStatus.ACTIVE.value, AgentStatus.IN_GAME.value]}}
+        )
         async for data in cursor:
             data.pop('_id', None)
             data = await self._ensure_agent_wallet(data)
@@ -321,8 +323,15 @@ class UserAgentManager:
         if not agent or agent.status == AgentStatus.DISABLED:
             return False
 
-        # Update status
-        await self.update_agent(agent_id, {"status": AgentStatus.ACTIVE.value})
+        # Recover stale in-game state after service restarts.
+        await self.update_agent(
+            agent_id,
+            {
+                "status": AgentStatus.ACTIVE.value,
+                "current_game_id": None,
+                "current_arena_address": None,
+            },
+        )
 
         # Create and start the agent's task
         task = asyncio.create_task(self._agent_loop(agent_id))
@@ -354,7 +363,7 @@ class UserAgentManager:
                 # Look for available tournaments
                 tournaments = await self._find_matching_tournaments(agent)
 
-                if tournaments and agent.current_game_id is None:
+                if agent.auto_join and tournaments and agent.current_game_id is None:
                     # Join the best matching tournament
                     tournament = tournaments[0]
                     success = await self._join_tournament(agent, tournament)
@@ -387,6 +396,16 @@ class UserAgentManager:
                 # Skip closed or finalized
                 if arena.get('is_closed') or arena.get('is_finalized'):
                     continue
+
+                # Skip arenas where registration deadline has elapsed.
+                registration_deadline = arena.get('registration_deadline')
+                if registration_deadline:
+                    try:
+                        deadline_dt = datetime.fromisoformat(registration_deadline.replace("Z", "+00:00"))
+                        if deadline_dt <= datetime.now(timezone.utc):
+                            continue
+                    except (TypeError, ValueError):
+                        pass
 
                 # Check entry fee range
                 entry_fee = int(arena.get('entry_fee', '0'))
