@@ -1324,6 +1324,23 @@ async def register_user_agent_with_openclaw(agent: AgentConfig) -> Dict[str, Any
         },
     }
 
+    def _is_tool_unavailable_response(resp: httpx.Response) -> bool:
+        """Detect OpenClaw's tool-not-found payload across status codes."""
+        try:
+            body = resp.json()
+        except Exception:
+            return False
+        error_payload = body.get("error")
+        if not isinstance(error_payload, dict):
+            return False
+        error_type = str(error_payload.get("type") or "").lower()
+        error_message = str(error_payload.get("message") or "").lower()
+        return (
+            error_type == "not_found"
+            and "tool not available" in error_message
+            and OPENCLAW_USER_AGENT_CREATE_TOOL.lower() in error_message
+        )
+
     configured_path = (OPENCLAW_TOOL_INVOKE_PATH or "/api/v1/tools/invoke").strip()
     if not configured_path.startswith("/"):
         configured_path = f"/{configured_path}"
@@ -1373,6 +1390,18 @@ async def register_user_agent_with_openclaw(agent: AgentConfig) -> Dict[str, Any
 
                 # Common mismatch statuses when gateway path is wrong.
                 if candidate_response.status_code in (404, 405):
+                    if _is_tool_unavailable_response(candidate_response) and not OPENCLAW_USER_AGENT_CREATE_REQUIRED:
+                        logger.warning(
+                            "OpenClaw tool '%s' unavailable on gateway (status %s); using optional local registration mode for agent %s",
+                            OPENCLAW_USER_AGENT_CREATE_TOOL,
+                            candidate_response.status_code,
+                            agent.agent_id,
+                        )
+                        return {
+                            "registered": True,
+                            "session_id": f"local:{agent.agent_id}",
+                            "error": None,
+                        }
                     last_http_error = candidate_response
                     continue
 
@@ -1386,6 +1415,24 @@ async def register_user_agent_with_openclaw(agent: AgentConfig) -> Dict[str, Any
         return {"registered": False, "session_id": None, "error": detail}
 
     if response is None:
+        # Gateway reachable but invoke paths/tool unsupported: allow local mode when optional.
+        if (
+            last_http_error is not None
+            and last_http_error.status_code in (404, 405)
+            and not OPENCLAW_USER_AGENT_CREATE_REQUIRED
+        ):
+            logger.warning(
+                "OpenClaw invoke endpoints returned %s for tool '%s'; using optional local registration mode for agent %s",
+                last_http_error.status_code,
+                OPENCLAW_USER_AGENT_CREATE_TOOL,
+                agent.agent_id,
+            )
+            return {
+                "registered": True,
+                "session_id": f"local:{agent.agent_id}",
+                "error": None,
+            }
+
         if last_transport_error and not last_http_error:
             detail = f"Failed to connect to OpenClaw gateway: {last_transport_error}"
         elif last_http_error is not None:
