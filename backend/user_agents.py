@@ -274,9 +274,36 @@ class UserAgentManager:
 
     async def _ensure_agent_wallet(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Backfill wallet fields for agents created before wallet support."""
-        if data.get("wallet_address") and data.get("wallet_private_key"):
+        wallet_address = data.get("wallet_address")
+        wallet_private_key = data.get("wallet_private_key")
+
+        if wallet_address and wallet_private_key:
             return data
 
+        # If key exists but address missing, derive address from key.
+        if wallet_private_key and not wallet_address:
+            try:
+                acct = Account.from_key(wallet_private_key)
+                wallet_address = acct.address
+                if self.db is not None and data.get("agent_id"):
+                    await self.db.user_agents.update_one(
+                        {"agent_id": data["agent_id"]},
+                        {"$set": {"wallet_address": wallet_address}},
+                    )
+                data["wallet_address"] = wallet_address
+                return data
+            except Exception as e:
+                logger.error(f"Failed to derive wallet address from key for {data.get('agent_id')}: {e}")
+
+        # If address exists but key missing, do not rotate user-funded wallet address.
+        # Keep the address and let API surface a clear error for join/withdraw until key is restored.
+        if wallet_address and not wallet_private_key:
+            data["wallet_address"] = wallet_address
+            data["wallet_private_key"] = None
+            logger.warning(f"Agent {data.get('agent_id')} has wallet_address but missing wallet_private_key")
+            return data
+
+        # Legacy records with neither field get a fresh wallet.
         wallet_account = Account.create()
         wallet_address = wallet_account.address
         wallet_private_key = wallet_account.key.hex()
@@ -294,8 +321,10 @@ class UserAgentManager:
 
     @staticmethod
     def _player_address(agent: AgentConfig) -> str:
-        """Use wallet address as player identity; fallback keeps legacy agents functional."""
-        return agent.wallet_address or f"agent_{agent.agent_id}"
+        """Use real on-chain wallet address as the only valid player identity."""
+        if not agent.wallet_address:
+            raise ValueError(f"Agent {agent.agent_id} has no wallet_address")
+        return agent.wallet_address
 
     async def get_agent(self, agent_id: str) -> Optional[AgentConfig]:
         """Get an agent by ID"""
@@ -516,7 +545,8 @@ class UserAgentManager:
 
                 # Check if agent is already in this arena
                 agent_address = self._player_address(agent)
-                if agent_address in players:
+                normalized_players = {(p or "").lower() for p in players}
+                if agent_address.lower() in normalized_players:
                     continue
 
                 matching.append(arena)

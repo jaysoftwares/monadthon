@@ -111,7 +111,14 @@ const UserAgents = () => {
 
       if (response.ok) {
         const agent = await response.json();
+        setError(null);
         setAgents((prev) => [...prev, agent]);
+        if (!agent.openclaw_registered) {
+          const openClawReason = agent.openclaw_last_error
+            ? ` OpenClaw sync pending: ${agent.openclaw_last_error}`
+            : ' OpenClaw sync pending.';
+          setError(`Agent wallet created successfully.${openClawReason}`);
+        }
         setShowCreateModal(false);
         setNewAgent({
           name: '',
@@ -330,12 +337,19 @@ const UserAgents = () => {
                   </div>
                   <div>
                     <h3 className="font-semibold text-gray-900">{agent.name}</h3>
-                    <span className={`text-xs px-2 py-0.5 rounded-full ${
+                <span className={`text-xs px-2 py-0.5 rounded-full ${
                       agent.status === 'active' ? 'bg-green-100 text-green-700' :
                       agent.status === 'in_game' ? 'bg-blue-100 text-blue-700' :
                       'bg-gray-100 text-gray-600'
                     }`}>
                       {agent.status === 'in_game' ? 'Playing' : agent.status}
+                    </span>
+                    <span className={`ml-2 text-xs px-2 py-0.5 rounded-full ${
+                      agent.openclaw_registered
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : 'bg-amber-100 text-amber-700'
+                    }`}>
+                      {agent.openclaw_registered ? 'OpenClaw Synced' : 'OpenClaw Pending'}
                     </span>
                   </div>
                 </div>

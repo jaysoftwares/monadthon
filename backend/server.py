@@ -16,6 +16,7 @@ import time
 from web3 import Web3
 from web3.exceptions import BadFunctionCallOutput
 from eth_account import Account
+from eth_account.messages import encode_defunct
 from eth_abi.packed import encode_packed
 from eth_utils import keccak, to_checksum_address
 import asyncio
@@ -2311,6 +2312,8 @@ class AgentResponse(BaseModel):
     preferred_games: List[str]
     auto_join: bool
     daily_budget_wei: str
+    has_authorization: bool = False
+    authorization_expires_at: Optional[str] = None
     total_games: int
     total_wins: int
     total_earnings_wei: str
@@ -2336,6 +2339,32 @@ class AgentWithdrawRequest(BaseModel):
     amount_wei: str
 
 
+class AgentAuthorizeRequest(BaseModel):
+    signature: Optional[str] = None
+    expires_at: Optional[str] = None
+    nonce: Optional[str] = None
+
+
+def _resolve_agent_authorization_expiry(expires_at: Optional[str]) -> str:
+    if expires_at:
+        try:
+            return datetime.fromisoformat(expires_at.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid expires_at datetime: {e}")
+    return (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+
+
+def _build_agent_authorization_message(agent: AgentConfig, expires_at: str, nonce: str) -> str:
+    return (
+        f"CLAW_ARENA_AGENT_AUTHORIZATION\n"
+        f"agent_id:{agent.agent_id}\n"
+        f"owner_address:{agent.owner_address.lower()}\n"
+        f"agent_wallet:{(agent.wallet_address or '').lower()}\n"
+        f"expires_at:{expires_at}\n"
+        f"nonce:{nonce}"
+    )
+
+
 def agent_to_response(agent: AgentConfig) -> AgentResponse:
     win_rate = (agent.total_wins / agent.total_games * 100) if agent.total_games > 0 else 0.0
     net_profit = int(agent.total_earnings_wei) - int(agent.total_spent_wei)
@@ -2357,6 +2386,8 @@ def agent_to_response(agent: AgentConfig) -> AgentResponse:
         preferred_games=agent.preferred_games,
         auto_join=agent.auto_join,
         daily_budget_wei=agent.daily_budget_wei,
+        has_authorization=bool(getattr(agent, "has_authorization", False)),
+        authorization_expires_at=getattr(agent, "authorization_expires_at", None),
         total_games=agent.total_games,
         total_wins=agent.total_wins,
         total_earnings_wei=agent.total_earnings_wei,
@@ -2511,6 +2542,78 @@ async def stop_agent(agent_id: str, owner_address: str = Query(..., description=
         raise HTTPException(status_code=403, detail="Not authorized")
     success = await user_agent_manager.stop_agent(agent_id)
     return {"success": success, "status": "paused"}
+
+
+@api_router.post("/agents/{agent_id}/authorize")
+async def authorize_agent(
+    agent_id: str,
+    request: AgentAuthorizeRequest,
+    owner_address: str = Query(..., description="Owner wallet address for verification"),
+):
+    """
+    EIP-191 signed authorization so owner can explicitly allow auto-join behavior.
+    POST without signature returns the exact message to sign.
+    POST with signature verifies and stores authorization on agent record.
+    """
+    user_agent_manager.db = db
+    agent = await user_agent_manager.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.owner_address.lower() != owner_address.lower():
+        raise HTTPException(status_code=403, detail="Not authorized")
+    if not agent.wallet_address:
+        raise HTTPException(status_code=400, detail="Agent wallet is not configured")
+
+    expires_at = _resolve_agent_authorization_expiry(request.expires_at)
+    nonce = request.nonce or f"{agent.agent_id}:{int(time.time())}"
+    message_to_sign = _build_agent_authorization_message(agent, expires_at, nonce)
+
+    if not request.signature:
+        return {
+            "success": True,
+            "agent_id": agent.agent_id,
+            "owner_address": agent.owner_address,
+            "wallet_address": agent.wallet_address,
+            "authorized": bool(agent.has_authorization),
+            "expires_at": expires_at,
+            "nonce": nonce,
+            "message_to_sign": message_to_sign,
+        }
+
+    try:
+        recovered = Account.recover_message(
+            encode_defunct(text=message_to_sign),
+            signature=request.signature,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid signature: {e}")
+
+    if recovered.lower() != owner_address.lower():
+        raise HTTPException(
+            status_code=403,
+            detail=f"Signature owner mismatch. Signed by {recovered}, expected {owner_address}.",
+        )
+
+    await user_agent_manager.update_agent(
+        agent_id,
+        {
+            "has_authorization": True,
+            "authorization_expires_at": expires_at,
+            "last_active_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    updated = await user_agent_manager.get_agent(agent_id)
+
+    return {
+        "success": True,
+        "agent_id": agent_id,
+        "owner_address": owner_address,
+        "wallet_address": updated.wallet_address if updated else agent.wallet_address,
+        "authorized": True,
+        "expires_at": expires_at,
+        "nonce": nonce,
+        "message_to_sign": message_to_sign,
+    }
 
 
 @api_router.get("/agents/{agent_id}/wallet", response_model=AgentWalletResponse)
