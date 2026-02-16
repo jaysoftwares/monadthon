@@ -114,10 +114,14 @@ const UserAgents = () => {
         setError(null);
         setAgents((prev) => [...prev, agent]);
         if (!agent.openclaw_registered) {
-          const openClawReason = agent.openclaw_last_error
-            ? ` OpenClaw sync pending: ${agent.openclaw_last_error}`
-            : ' OpenClaw sync pending.';
-          setError(`Agent wallet created successfully.${openClawReason}`);
+          const openClawError = String(agent.openclaw_last_error || '');
+          const toolUnavailable = openClawError.toLowerCase().includes('tool not available');
+          if (!toolUnavailable) {
+            const openClawReason = openClawError
+              ? ` OpenClaw sync pending: ${openClawError}`
+              : ' OpenClaw sync pending.';
+            setError(`Agent wallet created successfully.${openClawReason}`);
+          }
         }
         setShowCreateModal(false);
         setNewAgent({
@@ -316,7 +320,17 @@ const UserAgents = () => {
         </div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
-          {agents.map((agent) => (
+          {agents.map((agent) => {
+            const openClawError = String(agent.openclaw_last_error || '');
+            const openClawToolMissing = !agent.openclaw_registered && openClawError.toLowerCase().includes('tool not available');
+            const openClawLabel = openClawToolMissing
+              ? 'OpenClaw Optional'
+              : (agent.openclaw_registered ? 'OpenClaw Synced' : 'OpenClaw Pending');
+            const openClawStyle = openClawToolMissing
+              ? 'bg-slate-100 text-slate-700'
+              : (agent.openclaw_registered ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700');
+
+            return (
             <div
               key={agent.agent_id}
               className="bg-white rounded-xl border border-gray-200 p-6 hover:shadow-md transition-shadow"
@@ -344,12 +358,8 @@ const UserAgents = () => {
                     }`}>
                       {agent.status === 'in_game' ? 'Playing' : agent.status}
                     </span>
-                    <span className={`ml-2 text-xs px-2 py-0.5 rounded-full ${
-                      agent.openclaw_registered
-                        ? 'bg-emerald-100 text-emerald-700'
-                        : 'bg-amber-100 text-amber-700'
-                    }`}>
-                      {agent.openclaw_registered ? 'OpenClaw Synced' : 'OpenClaw Pending'}
+                    <span className={`ml-2 text-xs px-2 py-0.5 rounded-full ${openClawStyle}`}>
+                      {openClawLabel}
                     </span>
                   </div>
                 </div>
@@ -478,7 +488,7 @@ const UserAgents = () => {
                 </div>
               </div>
             </div>
-          ))}
+          )})}
         </div>
       )}
 

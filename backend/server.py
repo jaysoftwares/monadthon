@@ -113,7 +113,7 @@ OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", OPENCLAW_API_URL)
 OPENCLAW_BEARER_TOKEN = os.environ.get("OPENCLAW_BEARER_TOKEN", OPENCLAW_API_KEY)
 OPENCLAW_SESSION_KEY = os.environ.get("OPENCLAW_SESSION_KEY", "")
 OPENCLAW_USER_AGENT_CREATE_TOOL = os.environ.get("OPENCLAW_USER_AGENT_CREATE_TOOL", "arena.register_user_agent")
-OPENCLAW_TOOL_INVOKE_PATH = os.environ.get("OPENCLAW_TOOL_INVOKE_PATH", "/api/v1/tools/invoke")
+OPENCLAW_TOOL_INVOKE_PATH = os.environ.get("OPENCLAW_TOOL_INVOKE_PATH", "/tools/invoke")
 OPENCLAW_USER_AGENT_CREATE_REQUIRED = os.environ.get("OPENCLAW_USER_AGENT_CREATE_REQUIRED", "false").strip().lower() in (
     "1",
     "true",
@@ -1420,10 +1420,38 @@ async def register_user_agent_with_openclaw(agent: AgentConfig) -> Dict[str, Any
             raise HTTPException(status_code=502, detail=detail)
         return {"registered": False, "session_id": None, "error": detail}
 
-    success = bool(body.get("success"))
-    result = body.get("result") or {}
+    success = bool(body.get("success")) or bool(body.get("ok"))
+    result = body.get("result") if isinstance(body.get("result"), dict) else {}
     if not success:
-        detail = str(body.get("error") or body.get("message") or "OpenClaw registration failed")
+        error_payload = body.get("error")
+        error_type = ""
+        error_message = ""
+        if isinstance(error_payload, dict):
+            error_type = str(error_payload.get("type") or "").lower()
+            error_message = str(error_payload.get("message") or "")
+        else:
+            error_message = str(error_payload or body.get("message") or "")
+
+        # Some OpenClaw gateway builds do not expose custom registration tools.
+        # Treat this specific "tool not available" response as non-fatal so agent creation works.
+        tool_unavailable = (
+            error_type == "not_found"
+            and "tool not available" in error_message.lower()
+            and OPENCLAW_USER_AGENT_CREATE_TOOL.lower() in error_message.lower()
+        )
+        if tool_unavailable and not OPENCLAW_USER_AGENT_CREATE_REQUIRED:
+            logger.warning(
+                "OpenClaw tool '%s' unavailable on gateway; using optional local registration mode for agent %s",
+                OPENCLAW_USER_AGENT_CREATE_TOOL,
+                agent.agent_id,
+            )
+            return {
+                "registered": True,
+                "session_id": f"local:{agent.agent_id}",
+                "error": None,
+            }
+
+        detail = error_message or str(body.get("message") or "OpenClaw registration failed")
         if OPENCLAW_USER_AGENT_CREATE_REQUIRED:
             raise HTTPException(status_code=502, detail=detail)
         return {"registered": False, "session_id": None, "error": detail}
