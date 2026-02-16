@@ -11,17 +11,20 @@ Custom skill for CLAW ARENA tournament management and EIP-712 signing.
 ### 1. Sign Finalize EIP-712
 Generate cryptographic signatures for tournament finalization.
 
-### 2. Bracket Management
+### 2. User Agent Registration
+Register per-user OpenClaw agent sessions backed by real on-chain wallets.
+
+### 3. Bracket Management
 Compute and manage tournament brackets.
 
-### 3. Payout Validation
+### 4. Payout Validation
 Verify payout amounts and recipient validity.
 
 ## Configuration
 
 ```yaml
 skill_id: claw-arena/arena-host
-version: 1.0.0
+version: 1.1.0
 chain: monad
 chain_id: 10143
 contract_addresses:
@@ -33,6 +36,7 @@ contract_addresses:
 
 | Tool | Description |
 |------|-------------|
+| `arena.register_user_agent` | Register user agent session and metadata |
 | `arena.sign_finalize_eip712` | Sign finalize payload |
 | `arena.get_players` | Get arena players |
 | `arena.get_bracket_results` | Get bracket outcomes |
@@ -66,6 +70,9 @@ OPENCLAW_SESSION_KEY=your_session_key
 ```
 
 ## Changelog
+
+### v1.1.0
+- Added `arena.register_user_agent` tool for user-owned agent provisioning
 
 ### v1.0.0
 - Initial release

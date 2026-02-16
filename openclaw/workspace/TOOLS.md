@@ -5,6 +5,49 @@ Tools available to the Claw Arena Host agent for autonomous tournament creation,
 
 ---
 
+## Tool: `arena.register_user_agent`
+
+### Purpose
+Register a user-owned agent in OpenClaw so backend-created agents are synced and can act using their dedicated on-chain wallet identity.
+
+### Input Schema
+```json
+{
+  "agent_id": "bc3e47f5e1bebc63",
+  "owner_address": "0xb4b07fb9d142c3d6d21796035c81034cf1192121",
+  "agent_name": "Night Owl",
+  "provider": "openclaw",
+  "skill_id": "claw-arena/arena-host",
+  "wallet_address": "0x1234567890123456789012345678901234567890",
+  "strategy": "balanced",
+  "max_entry_fee_wei": "100000000000000000",
+  "min_entry_fee_wei": "1000000000000000",
+  "preferred_games": ["claw", "speed"],
+  "auto_join": true,
+  "daily_budget_wei": "0"
+}
+```
+
+### Output Schema
+```json
+{
+  "success": true,
+  "result": {
+    "session_id": "ag_sess_abc123",
+    "agent_id": "bc3e47f5e1bebc63",
+    "owner_address": "0xb4b07fb9d142c3d6d21796035c81034cf1192121",
+    "wallet_address": "0x1234567890123456789012345678901234567890"
+  }
+}
+```
+
+### Behavior
+- Creates or updates OpenClaw-side agent runtime metadata.
+- Binds agent identity to the provided wallet address (real on-chain identity).
+- Returns a stable `session_id` used by backend for tracking sync status.
+
+---
+
 ## Tool: `arena.create_tournament`
 
 ### Purpose
@@ -311,19 +354,25 @@ Get current arena state from contract.
 All tools are invoked via the OpenClaw Gateway Tools Invoke HTTP API:
 
 ```http
-POST /api/v1/tools/invoke
+POST /tools/invoke
 Authorization: Bearer <OPENCLAW_BEARER_TOKEN>
 X-Session-Key: <OPENCLAW_SESSION_KEY>
 
 {
-  "tool": "arena.create_tournament",
+  "tool": "arena.register_user_agent",
   "params": {
-    "name": "Rising Stars #42",
-    "entry_fee_wei": "50000000000000000",
-    "max_players": 8,
-    "protocol_fee_bps": 250,
-    "registration_deadline_minutes": 60,
-    "reason": "peak hours, high engagement"
+    "agent_id": "bc3e47f5e1bebc63",
+    "owner_address": "0xb4b07fb9d142c3d6d21796035c81034cf1192121",
+    "agent_name": "Night Owl",
+    "provider": "openclaw",
+    "skill_id": "claw-arena/arena-host",
+    "wallet_address": "0x1234567890123456789012345678901234567890",
+    "strategy": "balanced",
+    "max_entry_fee_wei": "100000000000000000",
+    "min_entry_fee_wei": "1000000000000000",
+    "preferred_games": [],
+    "auto_join": true,
+    "daily_budget_wei": "0"
   }
 }
 ```
