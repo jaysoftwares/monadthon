@@ -113,6 +113,7 @@ OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", OPENCLAW_API_URL)
 OPENCLAW_BEARER_TOKEN = os.environ.get("OPENCLAW_BEARER_TOKEN", OPENCLAW_API_KEY)
 OPENCLAW_SESSION_KEY = os.environ.get("OPENCLAW_SESSION_KEY", "")
 OPENCLAW_USER_AGENT_CREATE_TOOL = os.environ.get("OPENCLAW_USER_AGENT_CREATE_TOOL", "arena.register_user_agent")
+OPENCLAW_TOOL_INVOKE_PATH = os.environ.get("OPENCLAW_TOOL_INVOKE_PATH", "/api/v1/tools/invoke")
 OPENCLAW_USER_AGENT_CREATE_REQUIRED = os.environ.get("OPENCLAW_USER_AGENT_CREATE_REQUIRED", "false").strip().lower() in (
     "1",
     "true",
@@ -1323,18 +1324,90 @@ async def register_user_agent_with_openclaw(agent: AgentConfig) -> Dict[str, Any
         },
     }
 
-    endpoint = f"{gateway_url}/api/v1/tools/invoke"
+    configured_path = (OPENCLAW_TOOL_INVOKE_PATH or "/api/v1/tools/invoke").strip()
+    if not configured_path.startswith("/"):
+        configured_path = f"/{configured_path}"
+
+    known_invoke_suffixes = (
+        "/api/v1/tools/invoke",
+        "/tools/invoke",
+        "/api/tools/invoke",
+        "/v1/tools/invoke",
+    )
+    endpoint_candidates: List[str] = []
+
+    lower_gateway = gateway_url.lower()
+    if any(lower_gateway.endswith(suffix) for suffix in known_invoke_suffixes):
+        endpoint_candidates.append(gateway_url)
+    else:
+        endpoint_candidates.extend(
+            [
+                f"{gateway_url}{configured_path}",
+                f"{gateway_url}/api/v1/tools/invoke",
+                f"{gateway_url}/tools/invoke",
+                f"{gateway_url}/api/tools/invoke",
+                f"{gateway_url}/v1/tools/invoke",
+            ]
+        )
+
+    # Dedupe while preserving order
+    endpoint_candidates = list(dict.fromkeys(endpoint_candidates))
+
+    selected_endpoint = None
+    response = None
+    last_transport_error = None
+    last_http_error = None
     try:
-        async with httpx.AsyncClient(timeout=30.0) as http_client:
-            response = await http_client.post(endpoint, headers=headers, json=payload)
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http_client:
+            for endpoint in endpoint_candidates:
+                selected_endpoint = endpoint
+                try:
+                    candidate_response = await http_client.post(endpoint, headers=headers, json=payload)
+                except httpx.RequestError as e:
+                    last_transport_error = e
+                    continue
+
+                if candidate_response.status_code == 200:
+                    response = candidate_response
+                    break
+
+                # Common mismatch statuses when gateway path is wrong.
+                if candidate_response.status_code in (404, 405):
+                    last_http_error = candidate_response
+                    continue
+
+                # Non-retryable application errors.
+                response = candidate_response
+                break
     except httpx.RequestError as e:
         detail = f"Failed to connect to OpenClaw gateway: {e}"
         if OPENCLAW_USER_AGENT_CREATE_REQUIRED:
             raise HTTPException(status_code=502, detail=detail)
         return {"registered": False, "session_id": None, "error": detail}
 
+    if response is None:
+        if last_transport_error and not last_http_error:
+            detail = f"Failed to connect to OpenClaw gateway: {last_transport_error}"
+        elif last_http_error is not None:
+            detail = (
+                f"OpenClaw agent registration failed on all known invoke paths "
+                f"({', '.join(endpoint_candidates)}). Last response: "
+                f"{last_http_error.status_code} - {last_http_error.text}"
+            )
+        else:
+            detail = (
+                f"OpenClaw agent registration failed before receiving a response. "
+                f"Attempted endpoints: {', '.join(endpoint_candidates)}"
+            )
+        if OPENCLAW_USER_AGENT_CREATE_REQUIRED:
+            raise HTTPException(status_code=502, detail=detail)
+        return {"registered": False, "session_id": None, "error": detail}
+
     if response.status_code != 200:
-        detail = f"OpenClaw agent registration failed: {response.status_code} - {response.text}"
+        detail = (
+            f"OpenClaw agent registration failed at {selected_endpoint}: "
+            f"{response.status_code} - {response.text}"
+        )
         if OPENCLAW_USER_AGENT_CREATE_REQUIRED:
             raise HTTPException(status_code=502, detail=detail)
         return {"registered": False, "session_id": None, "error": detail}
